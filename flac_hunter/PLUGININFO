@@ -1,0 +1,4 @@
+Name = FLAC Hunter
+Version = 2.0.0
+Author = Yahel
+Description = Cola secuencial de descargas FLAC. Procesa una petición a la vez desde ~/Música/.pipeline/cola.json, elige la mejor fuente por profundidad de bits y sample rate, descarga a una carpeta aislada y organiza en Artista/Álbum/NN Título.flac. Se alimenta con la CLI flacpipe o con el comando /flac.
