@@ -39,6 +39,7 @@ if _DIR_PLUGIN not in sys.path:
 import fh_biblioteca as biblioteca   # noqa: E402
 import fh_comun as comun             # noqa: E402
 import fh_fiio as fiio               # noqa: E402
+import fh_listas as listas           # noqa: E402
 
 
 # ─── Glifos ───────────────────────────────────────────────────────────────────
@@ -997,8 +998,8 @@ class VistaCola(Vista):
         return lista[self.cursor]
 
     def teclas(self, app):
-        return [("↑↓", "moverse"), ("a", "pedir"), ("x", "cancelar"),
-                ("o", "organizar"), ("c", "copiar al FiiO"),
+        return [("↑↓", "moverse"), ("a", "pedir"), ("i", "importar csv"),
+                ("x", "cancelar"), ("o", "organizar"), ("c", "copiar al FiiO"),
                 ("t", "todo" if not self.todo else "sólo activas"),
                 ("L", "limpiar")]
 
@@ -1217,6 +1218,8 @@ class VistaCola(Vista):
         campos = [("pedido", f"{hora_de(creado)} · {desde(creado)}", NORMAL, 2),
                   ("tipo", "canción suelta" if pet.get("tipo") == "cancion" else "álbum",
                    NORMAL, 3)]
+        if pet.get("lista"):
+            campos.append(("lista", pet["lista"], VIOLETA, 2))
         if estado == comun.BUSCANDO:
             consulta = pet["consulta"]
             termino = consulta if "flac" in consulta.casefold() else f"{consulta} flac"
@@ -1486,6 +1489,8 @@ class VistaCola(Vista):
             self.cursor = max(0, self.cursor - 5)
         elif k == "a":
             app.abrir(OverlayPedir())
+        elif k == "i":
+            app.abrir(OverlayImportar())
         elif k == "x":
             app.cancelar_peticion(self.seleccion(app))
         elif k == "t":
@@ -2347,6 +2352,181 @@ class OverlayPedir(Overlay):
         return True
 
 
+class OverlayImportar(Overlay):
+    """Elegir un CSV de playlist (Exportify, TuneMyMusic…) y encolar lo que traiga.
+
+    Dos pasos: primero la lista de .csv a la vista en las carpetas de siempre;
+    con ↵ se lee y se enseña el plan (qué se pide, qué ya tienes), y con otro
+    ↵ se encola. ⇥ cambia entre pedir canciones o los álbumes completos."""
+
+    def __init__(self):
+        self.archivos = listas.csv_candidatos()
+        self.cursor = 0
+        self.plan = None
+        self.error = ""
+        self.albumes = False
+        self.repetir = False
+
+    def _calcular(self):
+        if not self.archivos:
+            return
+        ruta = self.archivos[self.cursor][0]
+        try:
+            self.plan = listas.plan(ruta, albumes=self.albumes, repetir=self.repetir)
+            self.error = ""
+        except (OSError, ValueError) as error:
+            self.plan, self.error = None, f"{os.path.basename(ruta)}: {error}"
+
+    def dibujar(self, app):
+        if self.plan is None and not self.error:
+            self._lista(app)
+        else:
+            self._resumen(app)
+
+    def _lista(self, app):
+        win = app.pantalla
+        n = len(self.archivos)
+        y, x, alto, ancho = _marco(app, max(min(n, 12) + 5, 8), 78, "importar playlist")
+        if not self.archivos:
+            escribir(win, y, x, "No encontré ningún .csv en Descargas, Música, Documentos "
+                                "ni el escritorio.", AMARILLO, ancho=ancho)
+            escribir(win, y + 2, x, "Exporta la playlist con Exportify o TuneMyMusic y "
+                                    "guarda el CSV en una de esas carpetas.", TENUE, ancho=ancho)
+            escribir(win, y + 4, x, "esc cerrar", TENUE)
+            return
+        escribir(win, y, x, "qué archivo", TENUE)
+        casa = os.path.expanduser("~")
+        sitio = max(1, alto - 3)
+        desde_ = max(0, min(self.cursor - sitio + 1, n - sitio))
+        for i in range(sitio):
+            indice = desde_ + i
+            if indice >= n:
+                break
+            ruta, mtime = self.archivos[indice]
+            elegido = indice == self.cursor
+            fila = y + 1 + i
+            tinta = SEL if elegido else None
+            if elegido:
+                pintar(win, fila, x - 1, ancho + 2, SEL)
+            carpeta = os.path.dirname(ruta).replace(casa, "~")
+            cuando = desde(datetime.fromtimestamp(mtime).isoformat())
+            escribir(win, fila, x, elipsis(os.path.basename(ruta), ancho - 34),
+                     tinta or BLANCO)
+            escribir(win, fila, x + ancho - 32, rellenar(carpeta, 20), tinta or TENUE)
+            escribir(win, fila, x + ancho - len(cuando), cuando, tinta or TENUE)
+        escribir(win, y + alto - 1, x, "↵ ver qué se pediría", AMBAR)
+        escribir(win, y + alto - 1, x + 22, "esc cancelar", TENUE)
+
+    def _resumen(self, app):
+        win = app.pantalla
+        p = self.plan
+        if p is None:
+            y, x, alto, ancho = _marco(app, 7, 78, "importar playlist")
+            escribir(win, y, x, elipsis(self.error, ancho), ROJO)
+            escribir(win, y + 2, x, "Hacen falta columnas de artista y título, como las que "
+                                    "exportan Exportify o TuneMyMusic.", TENUE, ancho=ancho)
+            escribir(win, y + 4, x, "esc volver", TENUE)
+            return
+
+        pedir = p["pedir"]
+        que = "álbumes" if p["tipo"] == "album" else "canciones"
+        avisos = p["avisos"][:2]
+        cabecera = 2 + bool(p["tenidas"]) + bool(p["en_cola"]) + len(avisos)
+        alto = cabecera + 1 + min(len(pedir) + 1, 14) + 4
+        y, x, alto, ancho = _marco(app, alto, 78, f"importar «{p['nombre']}»")
+        fondo = y + alto
+        casa = os.path.expanduser("~")
+
+        escribir(win, y, x, elipsis(f"{len(p['canciones'])} canciones en "
+                                    f"{p['ruta'].replace(casa, '~')}", ancho), TENUE)
+        y += 1
+        if p["tenidas"]:
+            escribir(win, y, x, f"{OK} {len(p['tenidas'])} ya en la biblioteca, no se piden",
+                     TENUE)
+            y += 1
+        if p["en_cola"]:
+            escribir(win, y, x, f"{GLIFO_ESTADO[comun.PENDIENTE]} {len(p['en_cola'])} "
+                                f"ya en la cola", TENUE)
+            y += 1
+        for aviso in avisos:
+            escribir(win, y, x, elipsis(f"{AVISO} {aviso}", ancho), AMARILLO)
+            y += 1
+        y += 1
+        if pedir:
+            xx = escribir(win, y, x, f"» se piden {len(pedir)} {que}", BLANCO)
+            escribir(win, y, xx + 2, elipsis(f"{listas.estimacion(len(pedir), self.albumes)}, "
+                                             f"{listas.ritmo(self.albumes)}",
+                                             ancho - (xx - x) - 2), TENUE)
+            y += 1
+            sitio = max(0, fondo - 3 - y)
+            for i, e in enumerate(pedir[:sitio]):
+                if sitio and i == sitio - 1 and len(pedir) > sitio:
+                    escribir(win, y + i, x + 2, f"… y {len(pedir) - i} más", TENUE)
+                    break
+                escribir(win, y + i, x + 2, elipsis(f"{GLIFO_ESTADO[comun.PENDIENTE]} "
+                                                    f"{e['consulta']}", ancho - 2), NORMAL)
+        else:
+            escribir(win, y, x, "Nada que pedir: todo está ya en la biblioteca o en la cola.",
+                     AMARILLO, ancho=ancho)
+
+        escribir(win, fondo - 2, x, "pedir", TENUE)
+        escribir(win, fondo - 2, x + 7, " canciones ", NORMAL if self.albumes else INV)
+        escribir(win, fondo - 2, x + 19, " álbumes ", INV if self.albumes else NORMAL)
+        escribir(win, fondo - 2, x + 30, "⇥ cambia", TENUE)
+        escribir(win, fondo - 2, x + 41, "r", AMBAR, True)
+        escribir(win, fondo - 2, x + 43, "con lo que ya tienes: "
+                                         + ("sí" if self.repetir else "no"), TENUE)
+        if pedir:
+            escribir(win, fondo - 1, x, f"↵ encolar {len(pedir)} {que}", AMBAR)
+            escribir(win, fondo - 1, x + 12 + len(str(len(pedir))) + len(que) + 2,
+                     "esc volver", TENUE)
+        else:
+            escribir(win, fondo - 1, x, "esc volver", TENUE)
+
+    def tecla(self, app, k):
+        if self.plan is None and not self.error:
+            n = len(self.archivos)
+            if k == curses.KEY_UP:
+                self.cursor = max(0, self.cursor - 1)
+            elif k == curses.KEY_DOWN:
+                self.cursor = min(max(0, n - 1), self.cursor + 1)
+            elif k == curses.KEY_HOME:
+                self.cursor = 0
+            elif k == curses.KEY_END:
+                self.cursor = max(0, n - 1)
+            elif k in ("\n", "\r", curses.KEY_ENTER):
+                self._calcular()
+            elif k in ("\x1b", "q"):
+                app.cerrar_overlay()
+            return True
+        if k == "\x1b":
+            self.plan, self.error = None, ""          # volver a la lista
+        elif k == "\t" and self.plan is not None:
+            self.albumes = not self.albumes
+            self._calcular()
+        elif k == "r" and self.plan is not None:
+            self.repetir = not self.repetir
+            self._calcular()
+        elif k in ("\n", "\r", curses.KEY_ENTER) and self.plan is not None:
+            self._encolar(app)
+        return True
+
+    def _encolar(self, app):
+        p = self.plan
+        app.cerrar_overlay()
+        if not p["pedir"]:
+            app.avisar("nada que pedir de esa lista", AMARILLO)
+            return
+        creadas = listas.encolar(p)
+        que = "álbumes" if p["tipo"] == "album" else "canciones"
+        app.avisar(f"encoladas {len(creadas)} {que} de «{p['nombre']}» · "
+                   f"{listas.estimacion(len(creadas), p['tipo'] == 'album')}", VERDE, 6)
+        if creadas and not app.datos.nicotine_vivo():
+            app.avisar("encoladas, pero Nicotine+ está cerrado: la cola no avanza",
+                       AMARILLO, 6)
+        app.ir_a(0)
+
+
 class OverlayBuscar(Overlay):
     """Filtro incremental para la vista que lo abre."""
 
@@ -2725,6 +2905,8 @@ class App:
         return [
             ("pedir un álbum", "a", lambda: self.abrir(OverlayPedir())),
             ("pedir una canción suelta", "", lambda: self.abrir(OverlayPedir(cancion=True))),
+            ("importar una playlist en csv (Spotify)", "i",
+             lambda: self.abrir(OverlayImportar())),
             ("cancelar la petición seleccionada", "x",
              lambda: self.cancelar_peticion(self.vistas[0].seleccion(self))),
             ("limpiar lo terminado de la cola", "L", self.limpiar_cola),

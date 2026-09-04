@@ -164,7 +164,7 @@ def separar_consulta(texto):
     return None, None
 
 
-def crear_peticion(consulta, tipo="album", artista=None, album=None):
+def crear_peticion(consulta, tipo="album", artista=None, album=None, lista=None):
     consulta = " ".join(consulta.split())
     if artista is None and album is None:
         artista, album = separar_consulta(consulta)
@@ -173,6 +173,7 @@ def crear_peticion(consulta, tipo="album", artista=None, album=None):
         "id": f"{marca}-{_slug(consulta)}",
         "consulta": consulta,
         "tipo": tipo,                 # "album" | "cancion"
+        "lista": lista,               # de qué playlist vino, si vino de una
         "artista": artista,
         "album": album,
         "estado": PENDIENTE,
@@ -187,7 +188,7 @@ def crear_peticion(consulta, tipo="album", artista=None, album=None):
     }
 
 
-def añadir_peticiones(consultas, tipo="album"):
+def añadir_peticiones(consultas, tipo="album", lista=None):
     """Añade consultas a la cola, ignorando las que ya estén activas. Devuelve las creadas."""
     creadas = []
 
@@ -200,7 +201,7 @@ def añadir_peticiones(consultas, tipo="album"):
             consulta = " ".join(consulta.split())
             if not consulta or consulta.casefold() in activas:
                 continue
-            pet = crear_peticion(consulta, tipo=tipo)
+            pet = crear_peticion(consulta, tipo=tipo, lista=lista)
             cola["peticiones"].append(pet)
             activas.add(consulta.casefold())
             creadas.append(pet)

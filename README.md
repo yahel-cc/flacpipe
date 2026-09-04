@@ -79,7 +79,7 @@ en la vista en la que estás**. No hay nada que memorizar.
 
 | tecla | vista | para qué |
 |---|---|---|
-| `1` | Cola | las peticiones, con la fuente que ganó y las pistas cayendo una a una |
+| `1` | Cola | las peticiones, con la fuente que ganó y las pistas cayendo una a una; `i` importa una playlist en CSV |
 | `2` | Biblioteca | artista → álbum → pistas en columnas; marcar lo que va a la tarjeta |
 | `3` | FiiO | la tarjeta, el plan de copia y el orden físico verificándose en vivo |
 | `4` | Log | `pipeline.log` en directo, con la etiqueta coloreada y filtro |
@@ -143,6 +143,7 @@ flacpipe pedir "Radiohead - OK Computer"
 flacpipe pedir "Nujabes - Modal Soul" "Mk.gee - Two Star & The Dream Police"
 flacpipe pedir --archivo albums.txt     # una consulta por línea, # para comentarios
 flacpipe pedir --cancion "Steve Lacy - Dark Red"
+flacpipe pedir --csv "Mi playlist.csv"      # una playlist exportada de Spotify
 
 flacpipe estado            # cola y progreso
 flacpipe estado --seguir   # repinta cada 5 s con el log al pie
@@ -155,6 +156,37 @@ También desde cualquier ventana de chat de Nicotine+: `/flac Artista - Álbum`,
 
 El formato `Artista - Álbum` es el recomendado: el artista y el álbum se guardan
 por separado y sirven de respaldo si los archivos vienen con los tags rotos.
+
+### Playlists de Spotify
+
+Spotify no exporta nada, pero [Exportify](https://exportify.net), TuneMyMusic
+o Soundiiz sacan una playlist como CSV. `flacpipe pedir --csv archivo.csv` lo
+lee y pide **cada canción por separado**, como `--cancion`: el plugin busca
+«Artista - Canción flac», baja sólo esa pista y la archiva por sus tags en el
+álbum al que pertenece. Antes de encolar enseña el plan y salta lo que **ya
+está en la biblioteca** (por nombre de carpeta y de archivo, en la nueva y en la
+heredada) y lo que ya está en la cola.
+
+```bash
+flacpipe pedir --csv "Mi playlist.csv" --simular   # sólo el plan
+flacpipe pedir --csv "Mi playlist.csv"             # encolar
+flacpipe pedir --csv "Mi playlist.csv" --albumes   # los discos completos, una vez cada uno
+flacpipe pedir --csv "Mi playlist.csv" --repetir   # también lo que ya tienes
+```
+
+Las columnas se adivinan por la cabecera, así que sirve cualquier CSV con
+artista y título (y álbum, si lo hay), separado por comas, punto y coma o
+tabulador. De los artistas se queda con el principal, porque Soulseek exige que
+todas las palabras de la búsqueda estén en la ruta y un «feat.» sólo estorba;
+por lo mismo quita «(feat. …)» y «- Remastered 2009» del título. Cada petición
+recuerda de qué lista vino, y la ficha de la interfaz lo enseña.
+
+Cuenta unos 2 minutos por canción: 45 s de búsqueda más la descarga, una tras
+otra. Una playlist de 50 canciones son casi dos horas con Nicotine+ abierto.
+
+En la interfaz es la tecla `i` en la Cola: elige el CSV con las flechas entre
+los que haya en Descargas, Música, Documentos o el escritorio, mira el plan y
+encola con ↵. `⇥` cambia entre canciones y álbumes completos.
 
 ### Qué hace el plugin con cada petición
 
@@ -259,6 +291,7 @@ las entradas de un directorio.
 | `flac_hunter/fh_comun.py` | Rutas, cola JSON con `flock`, log, detección de Nicotine+ |
 | `flac_hunter/fh_biblioteca.py` | Tags FLAC, STREAMINFO, nombres seguros, organización, huecos |
 | `flac_hunter/fh_fiio.py` | Copia secuencial y verificación del orden físico |
+| `flac_hunter/fh_listas.py` | Playlists en CSV → peticiones; qué se tiene ya |
 | `flac_hunter/PLUGININFO` | Metadatos que lee Nicotine+ |
 | `flacpipe` | CLI |
 | `flacpipe_tui.py` | La interfaz a pantalla completa (curses) |

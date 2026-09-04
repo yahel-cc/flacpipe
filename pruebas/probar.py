@@ -7,6 +7,7 @@ conductor.py (texto más un mapa de colores por celda).
     python3 pruebas/probar.py real       # tu cola de verdad, sólo lectura, 3 tamaños
     python3 pruebas/probar.py falso      # descarga simulada, búsqueda, espera, aviso
     python3 pruebas/probar.py fiio       # copia a una tarjeta de mentira
+    python3 pruebas/probar.py importar   # importar playlists en csv desde la interfaz
 
 Las capturas quedan en pruebas/salida/capturas/<sesion>-<momento>.txt. Nada
 de esto escribe en ~/Música: lo real se lee y lo simulado vive en
@@ -278,6 +279,77 @@ def falso(cols, filas, etiqueta):
     s.cerrar()
 
 
+def csv_de_muestra(carpeta):
+    """Tres CSV como los que exportan los sitios, y uno que no sirve."""
+    shutil.rmtree(carpeta, ignore_errors=True)
+    os.makedirs(carpeta)
+    rutas = {}
+
+    rutas["raro"] = os.path.join(carpeta, "raro.csv")
+    open(rutas["raro"], "w", encoding="utf-8").write("foo,bar\n1,2\n")
+    time.sleep(0.05)
+
+    rutas["mia"] = os.path.join(carpeta, "mia.csv")
+    open(rutas["mia"], "w", encoding="utf-8").write(
+        "Artista;Canción;Álbum\n"
+        "CASIOPEA;Asayake;Mint Jams\n"
+        "Masayoshi Takanaka;Blue Lagoon;An Insatiable High\n")
+    time.sleep(0.05)
+
+    rutas["tune"] = os.path.join(carpeta, "tunemymusic.csv")
+    open(rutas["tune"], "w", encoding="utf-8").write(
+        "Track name,Artist name,Album,Playlist name,Type,ISRC,Spotify - id\n"
+        "Sum of My Cares,The Long Faces,Sum of My Cares,Domingo lento,Song,USX,1\n"
+        "Modal Soul,Nujabes,Modal Soul,Domingo lento,Song,JPX,2\n"
+        "Reflection Eternal,Nujabes,Modal Soul,Domingo lento,Song,JPX,3\n"
+        "Lovers Rock,TV Girl,French Exit,Domingo lento,Song,USX,4\n")
+    time.sleep(0.05)
+
+    rutas["exportify"] = os.path.join(carpeta, "Mi playlist.csv")
+    open(rutas["exportify"], "w", encoding="utf-8-sig").write(
+        "Track URI,Track Name,Album Name,Artist Name(s),Release Date,Duration (ms),"
+        "Popularity,Explicit,Added By,Added At,Genres,Record Label\n"
+        "spotify:track:1,Cadence,Cadence,The Long Faces,2017-05-05,299000,40,false,u,t,indie,I\n"
+        "spotify:track:2,Jean Skirt,Do That Again,Malcolm Todd,2026-04-04,59000,70,false,u,t,pop,C\n"
+        "spotify:track:3,Feather (feat. Cise Starr & Akin),Modal Soul,Nujabes,2005-11-11,178000,60,false,u,t,jazz,H\n"
+        "spotify:track:4,Karma Police - Remastered 2009,OK Computer,Radiohead,1997-05-21,264000,80,false,u,t,rock,X\n"
+        "spotify:track:5,EARFQUAKE,IGOR,\"Tyler, The Creator\",2019-05-17,190000,85,true,u,t,hip hop,C\n"
+        "spotify:track:6,South of the River,Geography,\"Tom Misch, Loyle Carner\",2018-04-13,240000,65,false,u,t,soul,B\n"
+        "spotify:track:7,Cadence,Cadence,The Long Faces,2017-05-05,299000,40,false,u,t,indie,I\n"
+        "spotify:track:8,,Un Álbum,Nadie,2020-01-01,1000,0,false,u,t,,\n")
+    return rutas
+
+
+def importar(cols, filas, etiqueta):
+    raiz = os.path.join(SALIDA, "falso")
+    esc = escenario_falso(raiz, "descargando")
+    carpeta_csv = os.path.join(SALIDA, "csv")
+    rutas = csv_de_muestra(carpeta_csv)
+    esc["listas"] = {"DIRS_CSV": [carpeta_csv]}
+    s = Sesion(f"importar-{etiqueta}", cols, filas, esc)
+    s.teclas("i")
+    s.capturar("selector", espera=1.0)
+    s.teclas("\r")
+    s.capturar("plan", espera=0.8)
+    s.teclas("\t")
+    s.capturar("plan-albumes", espera=0.8)
+    s.teclas("\t", "r")
+    s.capturar("plan-repetir", espera=0.8)
+    s.teclas("r", "\r")
+    s.capturar("encolado", espera=0.7)
+    s.capturar("encolado-lista", espera=2.5)
+    cola = json.load(open(esc["_cola"]))
+    nuevas = [p for p in cola["peticiones"] if p.get("lista")]
+    print(f"  encoladas de verdad: {len(nuevas)}  lista={nuevas[0]['lista'] if nuevas else None}")
+    s.teclas("\x1bOF")                   # la última encolada: su ficha dice de qué lista vino
+    s.capturar("ficha-lista", espera=0.6)
+    s.teclas("i", "\x1bOF", "\r")        # el último de la lista: raro.csv
+    s.capturar("error", espera=0.8)
+    s.teclas("\x1b", "\x1bOA", "\r")    # tunemymusic.csv
+    s.capturar("plan-tune", espera=0.8)
+    s.cerrar()
+
+
 def fiio_prueba(cols, filas, etiqueta):
     s = Sesion(f"fiio-{etiqueta}", cols, filas, {"fiio_falso": True})
     s.teclas("3")
@@ -303,4 +375,7 @@ if __name__ == "__main__":
         falso(78, 18, "chica")
     if que in ("fiio", "todo"):
         fiio_prueba(120, 40, "media")
+    if que in ("importar", "todo"):
+        importar(120, 40, "media")
+        importar(78, 20, "chica")
     print("capturas en", CAPTURAS)

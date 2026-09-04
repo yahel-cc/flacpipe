@@ -24,6 +24,8 @@ for clave, valor in escenario.get("comun", {}).items():
     setattr(comun, clave, valor)
 for clave, valor in escenario.get("tui", {}).items():
     setattr(tui, clave, valor)
+for clave, valor in escenario.get("listas", {}).items():
+    setattr(tui.listas, clave, valor)
 if escenario.get("nicotine_vivo"):
     comun.pid_nicotine = lambda: 424242
 

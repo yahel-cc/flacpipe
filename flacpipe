@@ -4,6 +4,7 @@
 PARTE 1 (automática, la ejecuta el plugin dentro de Nicotine+):
     flacpipe pedir "Radiohead - OK Computer"
     flacpipe pedir --archivo albums.txt
+    flacpipe pedir --csv playlist.csv     # exportada de Spotify
     flacpipe estado
 
 PARTE 2 (manual, la ejecutas tú cuando conectas el FiiO):
@@ -23,6 +24,7 @@ sys.path.insert(0, DIR_PLUGIN)
 import fh_biblioteca as biblioteca   # noqa: E402
 import fh_comun as comun             # noqa: E402
 import fh_fiio as fiio               # noqa: E402
+import fh_listas as listas           # noqa: E402
 
 ICONOS = {
     comun.PENDIENTE: "⧗",
@@ -41,6 +43,8 @@ def _nicotine_activo():
 # ─── pedir ────────────────────────────────────────────────────────────────────
 
 def cmd_pedir(args):
+    if args.csv:
+        return _pedir_csv(args)
     consultas = list(args.consulta)
     if args.archivo:
         with open(args.archivo, encoding="utf-8") as f:
@@ -59,6 +63,48 @@ def cmd_pedir(args):
     if repetidas:
         print(f"({repetidas} ya estaban en la cola, se ignoran)")
 
+    if creadas and not _nicotine_activo():
+        print("\n!  Nicotine+ no está corriendo: la cola no avanzará hasta abrirlo.")
+        print("   Ábrelo normalmente, o sin ventana con:  flacpipe arrancar")
+    return 0
+
+
+def _pedir_csv(args):
+    """Una playlist exportada en CSV: se piden sus canciones una a una (o sus
+    álbumes con --albumes), saltando lo que ya está en la biblioteca o en la cola."""
+    try:
+        plan = listas.plan(args.csv, albumes=args.albumes, repetir=args.repetir)
+    except (OSError, ValueError) as error:
+        print(f"✗ {args.csv}: {error}")
+        return 1
+
+    que = "álbumes" if plan["tipo"] == "album" else "canciones"
+    print(f"«{plan['nombre']}»  ·  {len(plan['canciones'])} canciones en el CSV")
+    for aviso in plan["avisos"]:
+        print(f"!  {aviso}")
+    if plan["tenidas"]:
+        print(f"\nYa en la biblioteca, no se piden ({len(plan['tenidas'])}):")
+        for e in plan["tenidas"]:
+            print(f"   ✓ {e['consulta']}")
+    if plan["en_cola"]:
+        print(f"\nYa en la cola ({len(plan['en_cola'])}):")
+        for e in plan["en_cola"]:
+            print(f"   {ICONOS.get(e['estado'], '·')} {e['consulta']}")
+    if not plan["pedir"]:
+        print("\nNada que pedir.")
+        return 0
+
+    albumes = plan["tipo"] == "album"
+    print(f"\nSe piden {len(plan['pedir'])} {que}  "
+          f"({listas.estimacion(len(plan['pedir']), albumes)}, {listas.ritmo(albumes)}):")
+    for e in plan["pedir"]:
+        print(f"   ⧗ {e['consulta']}")
+    if args.simular:
+        print("\n(simulación: no se encoló nada; quita --simular para pedirlas)")
+        return 0
+
+    creadas = listas.encolar(plan)
+    print(f"\n⧗ encoladas {len(creadas)} {que} de «{plan['nombre']}»")
     if creadas and not _nicotine_activo():
         print("\n!  Nicotine+ no está corriendo: la cola no avanzará hasta abrirlo.")
         print("   Ábrelo normalmente, o sin ventana con:  flacpipe arrancar")
@@ -603,6 +649,15 @@ def main():
     sp.add_argument("--archivo", "-a", help="Archivo de texto con una consulta por línea")
     sp.add_argument("--cancion", action="store_true",
                     help="Es una canción suelta, no un álbum completo")
+    sp.add_argument("--csv", metavar="RUTA",
+                    help="Playlist exportada en CSV (Exportify, TuneMyMusic…): "
+                         "se piden sus canciones una a una")
+    sp.add_argument("--albumes", action="store_true",
+                    help="Con --csv: pedir los álbumes completos en vez de las canciones")
+    sp.add_argument("--repetir", action="store_true",
+                    help="Con --csv: pedir también lo que ya está en la biblioteca o en la cola")
+    sp.add_argument("--simular", "-n", action="store_true",
+                    help="Con --csv: enseñar qué se pediría sin encolar nada")
     sp.set_defaults(func=cmd_pedir)
 
     sp = sub.add_parser("estado", help="Ver la cola y el progreso")
