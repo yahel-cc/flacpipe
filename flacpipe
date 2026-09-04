@@ -25,12 +25,12 @@ import fh_comun as comun             # noqa: E402
 import fh_fiio as fiio               # noqa: E402
 
 ICONOS = {
-    comun.PENDIENTE: "⏳",
-    comun.BUSCANDO: "🔎",
-    comun.DESCARGANDO: "📥",
-    comun.LISTO: "✅",
-    comun.FALLIDO: "❌",
-    comun.CANCELADO: "🚫",
+    comun.PENDIENTE: "⧗",
+    comun.BUSCANDO: "⟳",
+    comun.DESCARGANDO: "↓",
+    comun.LISTO: "✓",
+    comun.FALLIDO: "✗",
+    comun.CANCELADO: "⊘",
 }
 
 
@@ -54,13 +54,13 @@ def cmd_pedir(args):
     creadas = comun.añadir_peticiones(consultas, tipo=tipo)
 
     for pet in creadas:
-        print(f"⏳ encolado  {pet['consulta']}")
+        print(f"⧗ encolado  {pet['consulta']}")
     repetidas = len(consultas) - len(creadas)
     if repetidas:
         print(f"({repetidas} ya estaban en la cola, se ignoran)")
 
     if creadas and not _nicotine_activo():
-        print("\n⚠️  Nicotine+ no está corriendo: la cola no avanzará hasta abrirlo.")
+        print("\n!  Nicotine+ no está corriendo: la cola no avanzará hasta abrirlo.")
         print("   Ábrelo normalmente, o sin ventana con:  flacpipe arrancar")
     return 0
 
@@ -124,7 +124,7 @@ def _pintar_estado(args):
                 r = pet["resultado"]
                 print(f"     → {r['carpeta']}  ·  {r['pistas']} pistas  ·  {r['calidad']}")
                 if r.get("faltantes"):
-                    print("     ⚠️  INCOMPLETO, faltan las pistas "
+                    print("     !  INCOMPLETO, faltan las pistas "
                           + ", ".join(f"{n:02d}" for n in r["faltantes"])
                           + f"   (recupéralo con: flacpipe pedir \"{pet['consulta']}\")")
             elif pet.get("mensaje"):
@@ -133,7 +133,7 @@ def _pintar_estado(args):
     activas = sum(1 for p in cola["peticiones"] if p["estado"] in comun.ACTIVOS)
     print(f"\n{activas} en curso · {len(cola['peticiones'])} en total")
     if activas and not _nicotine_activo():
-        print("⚠️  Nicotine+ no está corriendo: la cola está detenida.")
+        print("!  Nicotine+ no está corriendo: la cola está detenida.")
 
     sobras = _sobras_descargas()
     sueltos = _sueltos_descargas()
@@ -143,7 +143,7 @@ def _pintar_estado(args):
             partes.append(f"{len(sobras)} carpeta(s)")
         if sueltos:
             partes.append(f"{len(sueltos)} archivo(s) suelto(s)")
-        print(f"⚠️  {' y '.join(partes)} sin organizar en .descargas "
+        print(f"!  {' y '.join(partes)} sin organizar en .descargas "
               f"(usa: flacpipe organizar)")
     return 0
 
@@ -182,12 +182,12 @@ def _agrupar_sueltos(simular=False):
     for ruta in sueltos:
         tags = biblioteca.leer_tags(ruta)
         if "ERROR" in tags:
-            print(f"   ⚠️  {os.path.basename(ruta)}: {tags['ERROR']} — se deja donde está")
+            print(f"   !  {os.path.basename(ruta)}: {tags['ERROR']} — se deja donde está")
             continue
         artista = (tags.get("ALBUMARTIST") or tags.get("ARTIST") or "").strip()
         album = (tags.get("ALBUM") or "").strip()
         if not artista or not album:
-            print(f"   ⚠️  {os.path.basename(ruta)}: sin ARTIST/ALBUM en los tags "
+            print(f"   !  {os.path.basename(ruta)}: sin ARTIST/ALBUM en los tags "
                   f"— se deja donde está")
             continue
         grupos.setdefault((artista, album), []).append(ruta)
@@ -238,7 +238,7 @@ def cmd_cancelar(args):
 
     tocadas = comun.modificar_cola(_op)
     for c in tocadas:
-        print(f"🚫 cancelado  {c}")
+        print(f"⊘ cancelado  {c}")
     if not tocadas:
         print("No hay nada activo que coincida.")
     return 0
@@ -268,20 +268,20 @@ def cmd_organizar(args):
         return 0
 
     for carpeta in carpetas:
-        print(f"\n📦 {os.path.basename(carpeta)}")
+        print(f"\n▸ {os.path.basename(carpeta)}")
         resultado = biblioteca.organizar(carpeta, simular=args.simular)
         if not resultado.get("ok"):
-            print(f"   ❌ {resultado.get('motivo')}")
+            print(f"   ✗ {resultado.get('motivo')}")
             for aviso in resultado.get("avisos", []):
-                print(f"   ⚠️  {aviso}")
+                print(f"   !  {aviso}")
             continue
         print(f"   → {resultado['carpeta']}  ·  {resultado['calidad']}")
         for nombre in resultado["nombres"]:
             print(f"      {nombre}")
         for aviso in resultado.get("avisos", []):
-            print(f"   ⚠️  {aviso}")
+            print(f"   !  {aviso}")
         if resultado["omitidas"]:
-            print(f"   ⏩ {resultado['omitidas']} ya existían con igual o mejor calidad")
+            print(f"   » {resultado['omitidas']} ya existían con igual o mejor calidad")
     if args.simular:
         print("\n(simulación: no se movió nada)")
     return 0
@@ -294,7 +294,7 @@ def _elegir_destino(args):
         return args.destino
     destinos = fiio.detectar_destinos()
     if not destinos:
-        print("❌ No encuentro ninguna tarjeta montada en /run/media, /media ni /mnt.")
+        print("✗ No encuentro ninguna tarjeta montada en /run/media, /media ni /mnt.")
         print("   Conecta el FiiO (o el lector de la microSD) y vuelve a intentar,")
         print("   o indica la ruta a mano con --destino /ruta/al/montaje")
         return None
@@ -339,7 +339,7 @@ def cmd_fiio(args):
     print("=" * 72)
 
     if not args.simular and libre and total_bytes > libre:
-        print(f"\n❌ No cabe: faltan {comun.formato_bytes(total_bytes - libre)}")
+        print(f"\n✗ No cabe: faltan {comun.formato_bytes(total_bytes - libre)}")
         return 1
 
     if not args.simular and not args.si:
@@ -358,19 +358,19 @@ def cmd_fiio(args):
     if resumen["omitidos"]:
         print(f"  Ya estaban: {resumen['omitidos']}")
     if resumen["desordenados"]:
-        print(f"  ⚠️  Con el orden físico en duda ({len(resumen['desordenados'])}):")
+        print(f"  !  Con el orden físico en duda ({len(resumen['desordenados'])}):")
         for rel in resumen["desordenados"]:
             print(f"        {rel}")
         print("     Reescríbelos en orden con:  flacpipe fiio --rehacer " +
               " ".join(f'"{r}"' for r in resumen["desordenados"][:3]))
     for error in resumen["errores"]:
-        print(f"  ❌ {error}")
+        print(f"  ✗ {error}")
 
     if args.desmontar and not args.simular:
         print("\nDesmontando…")
         fiio.desmontar(montaje)
     elif not args.simular:
-        print("\n✅ Listo. Antes de desconectar:  flacpipe fiio --desmontar  (o expúlsalo desde el escritorio)")
+        print("\n✓ Listo. Antes de desconectar:  flacpipe fiio --desmontar  (o expúlsalo desde el escritorio)")
     return 0
 
 
@@ -393,44 +393,18 @@ def cmd_arrancar(args):
 
 # ─── revisar ──────────────────────────────────────────────────────────────────
 
-DIR_SNAP = "/home/yahel/snap/nicotine-plus/current"
-ENLACE_PLUGIN = os.path.join(DIR_SNAP, ".local/share/nicotine/plugins/flac_hunter")
-CONFIG_NICOTINE = os.path.join(DIR_SNAP, ".config/nicotine/config")
-
-
-def _ultimo_arranque_plugin():
-    """Marca de tiempo del último '[plugin] activado' en pipeline.log."""
-    try:
-        with open(comun.ARCHIVO_LOG, encoding="utf-8", errors="replace") as f:
-            lineas = [l for l in f if "[plugin] activado" in l]
-    except OSError:
-        return None
-    if not lineas:
-        return None
-    import datetime
-    try:
-        return datetime.datetime.fromisoformat(lineas[-1].split("  ")[0]).timestamp()
-    except ValueError:
-        return None
-
-
-def _snap_lee_plugin():
-    """Comprueba de verdad que el proceso confinado alcanza el código del plugin."""
-    import subprocess
-    orden = ("python3 -c \"import os,sys;"
-             "sys.exit(0 if os.path.isfile('%s/__init__.py') else 1)\"" % ENLACE_PLUGIN)
-    try:
-        r = subprocess.run(["snap", "run", "--shell", "nicotine-plus", "-c", orden],
-                           capture_output=True, timeout=60)
-        return r.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return None
+# Viven en fh_comun porque la vista de salud de la interfaz usa lo mismo.
+DIR_SNAP = comun.DIR_SNAP
+ENLACE_PLUGIN = comun.ENLACE_PLUGIN
+CONFIG_NICOTINE = comun.CONFIG_NICOTINE
+_ultimo_arranque_plugin = comun.ultimo_arranque_plugin
+_snap_lee_plugin = comun.snap_lee_plugin
 
 
 def cmd_revisar(args):
-    ok = "✅"
-    mal = "❌"
-    duda = "⚠️ "
+    ok = "✓"
+    mal = "✗"
+    duda = "! "
     problemas = []
 
     def linea(estado, texto, detalle=""):
@@ -585,12 +559,12 @@ def _prueba_en_seco():
                 and resultado["calidad"] == "24-bit / 96 kHz")
 
     if correcto:
-        print("  ✅ 12 pistas con nombres caóticos → Prueba Pipeline/Disco De Prueba/")
+        print("  ✓ 12 pistas con nombres caóticos → Prueba Pipeline/Disco De Prueba/")
         print(f"       {resultado['nombres'][0]}  …  {resultado['nombres'][-1]}")
         print(f"       calidad detectada: {resultado['calidad']}")
         print("       caracteres ilegales en FAT sustituidos: ꞉ ⁄")
     else:
-        print(f"  ❌ el organizador no dio el resultado esperado: {resultado}")
+        print(f"  ✗ el organizador no dio el resultado esperado: {resultado}")
 
     shutil.rmtree(destino, ignore_errors=True)
     try:
@@ -601,6 +575,17 @@ def _prueba_en_seco():
     print("  (limpiado)")
 
 
+# ─── interfaz ─────────────────────────────────────────────────────────────────
+
+def cmd_tui(_args):
+    """Abre la interfaz a pantalla completa. Es lo que sale al escribir `flacpipe`."""
+    raiz = os.path.dirname(os.path.realpath(__file__))
+    if raiz not in sys.path:
+        sys.path.insert(0, raiz)
+    import flacpipe_tui
+    return flacpipe_tui.ejecutar()
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -608,6 +593,10 @@ def main():
         prog="flacpipe", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="orden", required=True)
+
+    sp = sub.add_parser("tui", help="Interfaz a pantalla completa (lo mismo que "
+                                    "escribir `flacpipe` a secas)")
+    sp.set_defaults(func=cmd_tui)
 
     sp = sub.add_parser("pedir", help="Encolar álbumes o canciones para descargar")
     sp.add_argument("consulta", nargs="*", help='p. ej. "Radiohead - OK Computer"')
@@ -656,6 +645,11 @@ def main():
     sp = sub.add_parser("arrancar", help="Abrir Nicotine+ si no está corriendo")
     sp.add_argument("--headless", action="store_true", help="Sin ventana")
     sp.set_defaults(func=cmd_arrancar)
+
+    # Sin argumentos se abre la interfaz: antes esto sólo daba un error de uso.
+    if len(sys.argv) == 1:
+        comun.asegurar_dirs()
+        return cmd_tui(None)
 
     args = p.parse_args()
     comun.asegurar_dirs()

@@ -248,3 +248,39 @@ def formato_bytes(n):
             return f"{n:.1f} {unidad}" if unidad != "B" else f"{int(n)} B"
         n /= 1024
     return f"{n:.1f} TB"
+
+
+# ─── Instalación dentro del snap ──────────────────────────────────────────────
+# Lo usan tanto `flacpipe revisar` como la vista de salud de la interfaz.
+
+DIR_SNAP = "/home/yahel/snap/nicotine-plus/current"
+ENLACE_PLUGIN = os.path.join(DIR_SNAP, ".local/share/nicotine/plugins/flac_hunter")
+CONFIG_NICOTINE = os.path.join(DIR_SNAP, ".config/nicotine/config")
+
+
+def ultimo_arranque_plugin():
+    """Marca de tiempo del último '[plugin] activado' en pipeline.log."""
+    try:
+        with open(ARCHIVO_LOG, encoding="utf-8", errors="replace") as f:
+            lineas = [l for l in f if "[plugin] activado" in l]
+    except OSError:
+        return None
+    if not lineas:
+        return None
+    try:
+        return datetime.fromisoformat(lineas[-1].split("  ")[0]).timestamp()
+    except ValueError:
+        return None
+
+
+def snap_lee_plugin():
+    """Comprueba de verdad que el proceso confinado alcanza el código del plugin."""
+    import subprocess
+    orden = ("python3 -c \"import os,sys;"
+             "sys.exit(0 if os.path.isfile('%s/__init__.py') else 1)\"" % ENLACE_PLUGIN)
+    try:
+        r = subprocess.run(["snap", "run", "--shell", "nicotine-plus", "-c", orden],
+                           capture_output=True, timeout=60)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None

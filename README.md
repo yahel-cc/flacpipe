@@ -67,12 +67,55 @@ Las rutas están fijas en `flac_hunter/fh_comun.py` (`RAIZ_BIBLIOTECA`) y en
 `instalar.sh`. Si tu usuario no es `yahel` o tu música no está en `~/Música`,
 cámbialas ahí.
 
+## La interfaz
+
+```bash
+flacpipe          # sin argumentos: interfaz a pantalla completa
+flacpipe tui      # lo mismo, explícito
+```
+
+Cinco vistas, una por tecla, y **la última fila dice siempre qué hace cada tecla
+en la vista en la que estás**. No hay nada que memorizar.
+
+| tecla | vista | para qué |
+|---|---|---|
+| `1` | Cola | las peticiones, con la fuente que ganó y las pistas cayendo una a una |
+| `2` | Biblioteca | artista → álbum → pistas en columnas; marcar lo que va a la tarjeta |
+| `3` | FiiO | la tarjeta, el plan de copia y el orden físico verificándose en vivo |
+| `4` | Log | `pipeline.log` en directo, con la etiqueta coloreada y filtro |
+| `5` | Salud | `revisar` como lista, con la tecla que arregla cada cosa debajo |
+
+La navegación es **con flechas**; no hay atajos estilo vim. `?` abre la ayuda
+entera, `:` una paleta con todas las órdenes buscando por nombre, `q` sale.
+
+En la biblioteca, `espacio` marca álbumes y `c` los manda a la tarjeta en ese
+orden; `p` reproduce la pista seleccionada con el primer reproductor que
+encuentre (`mpv`, `gst-play-1.0`, `pw-play`, `ffplay` o `mplayer`) y `s` la para.
+
+La biblioteca **se relee sola** cuando el plugin organiza un álbum: cada pocos
+segundos se compara el mtime de la raíz y el de cada carpeta de artista, y si
+algo cambió se recarga sin perder dónde estabas (la posición se recuerda por
+nombre, no por índice). `r` la fuerza a mano. `b` cambia entre la biblioteca
+nueva y la heredada, y **la esquina derecha de las pestañas dice siempre en cuál
+estás** — si un álbum recién bajado «no aparece», casi siempre es que estabas
+mirando la heredada.
+
+La CLI sigue entera y es la que hay que usar en scripts o con tuberías: la
+interfaz no la sustituye, sólo evita tener que recordarla.
+
+Se dibuja con `curses`, de la biblioteca estándar. La copia al FiiO y el
+organizador corren en un hilo aparte, así que la pantalla no se congela ni
+durante un `fsync` de 60 MB.
+
 ## Comprobar que funciona
 
 ```bash
 flacpipe revisar            # instalación, plugin, cola, álbumes incompletos, tarjeta
 flacpipe revisar --prueba   # además organiza un álbum falso, sin tocar la red
 ```
+
+Lo mismo se ve en la vista `5` de la interfaz, que además ofrece la tecla que
+arregla cada problema.
 
 `revisar` sabe si el plugin **se cargó de verdad** en esta sesión de Nicotine+:
 el plugin escribe `[plugin] activado` en `pipeline.log` al arrancar, y el comando
@@ -206,7 +249,12 @@ las entradas de un directorio.
 | `flac_hunter/fh_fiio.py` | Copia secuencial y verificación del orden físico |
 | `flac_hunter/PLUGININFO` | Metadatos que lee Nicotine+ |
 | `flacpipe` | CLI |
+| `flacpipe_tui.py` | La interfaz a pantalla completa (curses) |
 | `instalar.sh` | Instalador |
+
+La interfaz vive fuera de `flac_hunter/` a propósito: nunca la carga Nicotine+,
+sólo lee `cola.json` y `pipeline.log` con el mismo `flock` que todo lo demás, y
+lanza el trabajo pesado en un hilo. **El plugin no sabe que existe.**
 
 Los módulos compartidos llevan prefijo `fh_` porque Nicotine+ carga los plugins
 haciendo `sys.path.append(carpeta_del_plugin)`: los imports son absolutos y un
