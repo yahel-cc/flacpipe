@@ -20,6 +20,7 @@ Estructura:
 
 import curses
 import locale
+import math
 import os
 import re
 import shutil
@@ -50,6 +51,16 @@ VACIO = "─"
 BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ALTURAS = "▁▂▃▄▅▆▇█"
 
+PATRON_LOG = re.compile(r"^(\S+)\s+\[([^\]]+)\]\s*(.*)$")
+PATRON_ID = re.compile(r"(\d{8}-\d{6}-[a-z0-9-]+)")
+
+# Segundos que el plugin acumula resultados antes de elegir fuente
+# (settings["ventana_busqueda"] de flac_hunter). Sólo se usa para pintar la cuenta.
+VENTANA_BUSQUEDA = 45
+# Donde Nicotine+ escribe cada archivo mientras lo baja (config: incompletedir).
+DIR_INCOMPLETOS = os.path.join(comun.DIR_SNAP, ".local/share/nicotine/incomplete")
+PATRON_INCOMPLETO = re.compile(r"^INCOMPLETE[0-9a-f]{32}(.+)$")
+
 GLIFO_ESTADO = {
     comun.PENDIENTE: "⧗",
     comun.BUSCANDO: "⟳",
@@ -65,7 +76,11 @@ OK, MAL, AVISO = "✓", "✗", "!"
 # ─── Colores ──────────────────────────────────────────────────────────────────
 
 (NORMAL, AMBAR, VERDE, ROJO, AZUL, AMARILLO, VIOLETA, TENUE, BLANCO,
- SEL, INV, MARCA) = range(12)
+ SEL, INV, MARCA, MARCA_AMBAR, MARCA_ROJO, MARCA_AZUL) = range(15)
+
+# Con qué fondo se pinta un aviso según el color en que se pidió
+FONDO_DE = {VERDE: MARCA, AMBAR: MARCA_AMBAR, AMARILLO: MARCA_AMBAR,
+            ROJO: MARCA_ROJO, AZUL: MARCA_AZUL}
 
 _ATRIB = {}
 
@@ -80,13 +95,15 @@ COLOR_ESTADO = {
 
 
 def _iniciar_colores():
-    for indice in range(12):
+    for indice in range(15):
         _ATRIB[indice] = curses.A_NORMAL
     if not curses.has_colors():
         _ATRIB[BLANCO] = curses.A_BOLD
         _ATRIB[SEL] = curses.A_REVERSE
         _ATRIB[INV] = curses.A_REVERSE | curses.A_BOLD
         _ATRIB[MARCA] = curses.A_BOLD
+        for indice in (MARCA_AMBAR, MARCA_ROJO, MARCA_AZUL):
+            _ATRIB[indice] = curses.A_REVERSE | curses.A_BOLD
         _ATRIB[TENUE] = curses.A_DIM
         return
 
@@ -122,6 +139,9 @@ def _iniciar_colores():
         SEL: (255 if muchos else curses.COLOR_WHITE, 238 if muchos else curses.COLOR_BLUE),
         INV: (16 if muchos else curses.COLOR_BLACK, 208 if muchos else curses.COLOR_YELLOW),
         MARCA: (157 if muchos else curses.COLOR_GREEN, 22 if muchos else curses.COLOR_BLACK),
+        MARCA_AMBAR: (223 if muchos else curses.COLOR_BLACK, 94 if muchos else curses.COLOR_YELLOW),
+        MARCA_ROJO: (224 if muchos else curses.COLOR_WHITE, 88 if muchos else curses.COLOR_RED),
+        MARCA_AZUL: (153 if muchos else curses.COLOR_WHITE, 24 if muchos else curses.COLOR_BLUE),
     }
     for indice, (frente, atras) in parejas.items():
         try:
@@ -178,10 +198,10 @@ def rellenar(texto, ancho):
     return elipsis(texto, ancho).ljust(max(0, ancho))
 
 
-def barra(win, y, x, ancho, frac, color=AMBAR, vacio=TENUE):
-    """Barra con resolución de un octavo de celda."""
+def barra_texto(ancho, frac):
+    """(lleno, vacío) de una barra con resolución de un octavo de celda."""
     if ancho <= 0:
-        return x
+        return "", ""
     frac = max(0.0, min(1.0, frac))
     total = frac * ancho
     llenas = int(total)
@@ -189,13 +209,27 @@ def barra(win, y, x, ancho, frac, color=AMBAR, vacio=TENUE):
     lleno = BLOQUE * min(llenas, ancho)
     if resto and len(lleno) < ancho:
         lleno += OCTAVOS[resto]
+    return lleno, VACIO * max(0, ancho - len(lleno))
+
+
+def barra(win, y, x, ancho, frac, color=AMBAR, vacio=TENUE):
+    """Barra con resolución de un octavo de celda."""
+    if ancho <= 0:
+        return x
+    lleno, hueco = barra_texto(ancho, frac)
     x = escribir(win, y, x, lleno, color)
-    return escribir(win, y, x, VACIO * max(0, ancho - len(lleno)), vacio)
+    return escribir(win, y, x, hueco, vacio)
 
 
 def girador(t=None):
     t = time.monotonic() if t is None else t
     return BRAILLE[int(t * 10) % len(BRAILLE)]
+
+
+def pulso(t=None):
+    """Un bloque que respira: para lo que está esperando turno."""
+    t = time.monotonic() if t is None else t
+    return ALTURAS[int((math.sin(t * 4) + 1) / 2 * 7 + 0.5)]
 
 
 def chispa(muestras, ancho, techo=None):
@@ -208,7 +242,42 @@ def chispa(muestras, ancho, techo=None):
     techo = techo or max(datos) or 1.0
     salida = "".join(
         ALTURAS[max(0, min(7, int(v / techo * 7 + 0.5)))] for v in datos)
-    return salida.rjust(ancho)
+    return salida.ljust(ancho)
+
+
+def medidor(velocimetro, ancho, t=None):
+    """VU de ocho alturas montado sobre la velocidad real.
+
+    La altura media es la velocidad actual respecto al máximo que se ha visto;
+    encima va un rizo senoidal para que se mueva. Un peer lento se nota porque
+    el medidor se queda pegado abajo, no porque deje de moverse.
+    """
+    if ancho <= 0:
+        return ""
+    if velocimetro.actual <= 0:
+        return ALTURAS[0] * ancho
+    t = time.monotonic() if t is None else t
+    techo = max(velocimetro.historial, default=0.0) or velocimetro.actual
+    nivel = min(1.0, velocimetro.actual / (techo or 1.0))
+    salida = []
+    for i in range(ancho):
+        onda = (math.sin(t * 5.1 + i * 0.85) + math.sin(t * 2.7 - i * 0.4) + 2) / 4
+        v = nivel * (0.55 + 0.45 * onda)
+        salida.append(ALTURAS[max(0, min(7, int(v * 7 + 0.5)))])
+    return "".join(salida)
+
+
+def barrido(ancho, t=None, color=AMBAR):
+    """Barra indeterminada: un bloque que va y viene. Trozos (texto, color)."""
+    if ancho <= 0:
+        return []
+    t = time.monotonic() if t is None else t
+    bloque = max(2, ancho // 5)
+    recorrido = max(1, ancho - bloque)
+    fase = (t * 1.1) % 2.0
+    pos = int((fase if fase <= 1 else 2 - fase) * recorrido + 0.5)
+    return [(VACIO * pos, TENUE), (BLOQUE * bloque, color),
+            (VACIO * max(0, ancho - pos - bloque), TENUE)]
 
 
 def marquesina(texto, ancho, t=None):
@@ -220,6 +289,55 @@ def marquesina(texto, ancho, t=None):
     doble = texto + "   ·   "
     salto = int(t * 4) % len(doble)
     return (doble + doble)[salto:salto + ancho]
+
+
+def pintar_fila(win, y, x, ancho, izq, der=()):
+    """Una fila hecha de trozos (texto, color): `izq` de corrido y `der`
+    pegado al borde derecho. El último trozo de `izq` se recorta con «…»."""
+    if ancho <= 0:
+        return
+    ancho_der = sum(len(t) for t, _c in der)
+    limite = ancho - (ancho_der + 1 if der else 0)
+    xx = x
+    for texto, color in izq:
+        sitio = limite - (xx - x)
+        if sitio <= 0:
+            break
+        xx = escribir(win, y, xx, elipsis(texto, sitio),
+                      NORMAL if color is None else color)
+    xx = x + max(0, ancho - ancho_der)
+    for texto, color in der:
+        xx = escribir(win, y, xx, texto, NORMAL if color is None else color)
+
+
+def pintar_seccion(win, y, x, ancho, alto, titulo, filas, foco=None):
+    """Un título con su regla y debajo las filas que quepan en `alto`.
+
+    Si no caben todas, la última línea resume cuántas quedan fuera; con `foco`
+    se recorta la ventana para que esa fila siga a la vista.
+    """
+    if alto < 1 or ancho <= 0:
+        return
+    escribir(win, y, x, elipsis(titulo, ancho), NORMAL)
+    escribir(win, y, x + len(titulo) + 1, "─" * max(0, ancho - len(titulo) - 1), TENUE)
+    sitio = alto - 1
+    n = len(filas)
+    if sitio <= 0:
+        return
+    if n <= sitio:
+        desde, hasta, resumen = 0, n, None
+    else:
+        cuerpo = sitio - 1
+        desde = (0 if foco is None
+                 else max(0, min(foco - max(0, cuerpo - 2), n - cuerpo)))
+        hasta = min(n, desde + cuerpo)
+        partes = ([f"{desde} antes"] if desde else []) + \
+                 ([f"{n - hasta} más"] if hasta < n else [])
+        resumen = "… " + " · ".join(partes)
+    for i, (izq, der) in enumerate(filas[desde:hasta]):
+        pintar_fila(win, y + 1 + i, x, ancho, izq, der)
+    if resumen:
+        escribir(win, y + 1 + (hasta - desde), x, elipsis(resumen, ancho), TENUE)
 
 
 def duracion(segundos):
@@ -249,6 +367,26 @@ def desde(iso):
     return f"hace {int(d // 86400)} días"
 
 
+def segundos_desde(iso):
+    try:
+        return max(0.0, (datetime.now() - datetime.fromisoformat(iso)).total_seconds())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def duracion_entre(iso_a, iso_b):
+    """'2:40' o '1 h 05 min' entre dos marcas ISO."""
+    try:
+        s = (datetime.fromisoformat(iso_b) - datetime.fromisoformat(iso_a)).total_seconds()
+    except (ValueError, TypeError):
+        return ""
+    if s < 0:
+        return ""
+    if s < 3600:
+        return duracion(s)
+    return f"{int(s // 3600)} h {int(s % 3600 // 60):02d} min"
+
+
 # ─── Velocímetro ──────────────────────────────────────────────────────────────
 
 class Velocimetro:
@@ -260,6 +398,7 @@ class Velocimetro:
         self.actual = 0.0
         self._previo = None
         self._t = 0.0
+        self._mostrado = 0.0
 
     def muestra(self, acumulado):
         ahora = time.monotonic()
@@ -273,11 +412,21 @@ class Velocimetro:
         self.historial.append(self.actual)
         self._previo, self._t = acumulado, ahora
 
+    def estimado(self):
+        """Los bytes de ahora mismo, interpolados entre dos lecturas para que
+        el contador suba de corrido y no a saltos. Nunca retrocede."""
+        if self._previo is None:
+            return 0
+        estimacion = self._previo + self.actual * (time.monotonic() - self._t)
+        self._mostrado = max(self._mostrado, estimacion)
+        return int(self._mostrado)
+
     def reiniciar(self):
         self.historial.clear()
         self.actual = 0.0
         self._previo = None
         self._t = 0.0
+        self._mostrado = 0.0
 
 
 # ─── Datos ────────────────────────────────────────────────────────────────────
@@ -296,12 +445,20 @@ class Datos:
         self.destinos = []
         self.sobras = []
         self.sueltos = []
+        self.bajados = []        # (archivo, bytes) ya completos de la petición en curso
+        self.incompletos = []    # (archivo, bytes) que Nicotine+ está escribiendo ahora
+        self.muestreado_en = 0.0
         self.velocimetro = Velocimetro()
+        self.cambios = {}        # id -> (estado nuevo, monotonic): para el parpadeo
+        self.eventos = deque()   # peticiones que cambiaron de estado: para los avisos
         self.aviso = ""
 
         self._mtime_cola = -1.0
         self._tam_log = -1
         self._ciclos = 0
+        self._historia_clave = None
+        self._historia = []
+        self._candidatos = []
         self._parar = threading.Event()
         self._hilo = None
 
@@ -330,7 +487,9 @@ class Datos:
             mtime = 0.0
         if mtime != self._mtime_cola:
             self._mtime_cola = mtime
-            self.cola = comun.leer_cola()
+            nueva = comun.leer_cola()
+            self._detectar_cambios(nueva)
+            self.cola = nueva
 
         try:
             tam = os.path.getsize(comun.ARCHIVO_LOG)
@@ -351,14 +510,28 @@ class Datos:
         if self._ciclos % 12 == 3:               # cada tres segundos
             self.pid_nicotine = comun.pid_nicotine()
 
+    def _detectar_cambios(self, nueva):
+        """Qué petición cambió de estado desde la lectura anterior. La primera
+        lectura no cuenta: lo viejo no merece aviso."""
+        previos = {p["id"]: p["estado"] for p in self.peticiones()}
+        ahora = time.monotonic()
+        for p in nueva.get("peticiones", []):
+            antes = previos.get(p["id"])
+            if antes is not None and antes != p["estado"]:
+                self.cambios[p["id"]] = (p["estado"], ahora)
+                self.eventos.append(p)
+
     def _mirar_descargas(self):
         sobras, sueltos = [], []
+        activa = self.peticion_en_curso()
         try:
             entradas = sorted(os.listdir(comun.DIR_DESCARGAS))
         except OSError:
             entradas = []
         for nombre in entradas:
             ruta = os.path.join(comun.DIR_DESCARGAS, nombre)
+            if activa is not None and nombre == activa["id"]:
+                continue           # a medio bajar: no es algo que organizar
             if os.path.isdir(ruta):
                 sobras.append(ruta)
             elif (nombre.lower().endswith(biblioteca.EXT_AUDIO)
@@ -366,19 +539,44 @@ class Datos:
                 sueltos.append(ruta)
         self.sobras, self.sueltos = sobras, sueltos
 
-        activa = self.peticion_en_curso()
         if activa is None:
             self.velocimetro.reiniciar()
+            self.bajados, self.incompletos = [], []
             return
+
+        # Lo ya completo cae en .descargas/<id>; lo que está bajando ahora
+        # mismo lo escribe Nicotine+ en su carpeta de incompletos, con un
+        # prefijo INCOMPLETE<md5>. Sumando los dos, los bytes suben de corrido.
         carpeta = os.path.join(comun.DIR_DESCARGAS, activa["id"])
-        total = 0
+        bajados = []
         for base, _dirs, archivos in os.walk(carpeta):
             for archivo in archivos:
                 try:
-                    total += os.path.getsize(os.path.join(base, archivo))
+                    bajados.append((archivo, os.path.getsize(os.path.join(base, archivo))))
                 except OSError:
                     pass
-        self.velocimetro.muestra(total)
+        bajados.sort()
+
+        incompletos = []
+        ahora = time.time()
+        try:
+            with os.scandir(DIR_INCOMPLETOS) as entradas:
+                for e in entradas:
+                    m = PATRON_INCOMPLETO.match(e.name)
+                    if not m or not e.is_file():
+                        continue
+                    st = e.stat()
+                    if ahora - st.st_mtime > 120:      # restos de otra ocasión
+                        continue
+                    incompletos.append((m.group(1), st.st_size))
+        except OSError:
+            pass
+        incompletos.sort()
+
+        self.bajados, self.incompletos = bajados, incompletos
+        self.muestreado_en = time.monotonic()
+        self.velocimetro.muestra(sum(b for _n, b in bajados)
+                                 + sum(b for _n, b in incompletos))
 
     # ── consultas ──
     def peticiones(self):
@@ -395,6 +593,58 @@ class Datos:
 
     def nicotine_vivo(self):
         return self.pid_nicotine is not None
+
+    def historia(self, id_pet):
+        """Las líneas del log que hablan de esa petición.
+
+        Las que llevan el id son fáciles. Las que no ([candidato], [archivo],
+        [descarte]) se atribuyen a la petición que el plugin tenía entre manos,
+        que es la del último [buscar]/[descargar]/[listo] visto. [cola] y
+        [cancelada] llevan id pero no cambian de manos: los escribe la CLI.
+        """
+        clave = (id_pet, self._tam_log)
+        if clave == self._historia_clave:
+            return self._historia
+        actual, salida = None, []
+        for linea in self.log:
+            m = PATRON_LOG.match(linea)
+            etiqueta = m.group(2).split()[0] if m else ""
+            con_id = PATRON_ID.search(linea)
+            if con_id:
+                if etiqueta not in ("cola", "cancelada", "plugin"):
+                    actual = con_id.group(1)
+                pertenece = con_id.group(1) == id_pet
+            else:
+                pertenece = actual == id_pet and etiqueta != "plugin"
+            if pertenece:
+                salida.append(linea)
+        self._historia_clave, self._historia = clave, salida
+        self._candidatos = self._leer_candidatos(salida)
+        return self._historia
+
+    def candidatos(self, id_pet):
+        """Las fuentes que el plugin puntuó, sacadas de las líneas [candidato]."""
+        self.historia(id_pet)
+        return self._candidatos
+
+    @staticmethod
+    def _leer_candidatos(lineas):
+        vistos = {}
+        for linea in lineas:
+            m = PATRON_LOG.match(linea)
+            if not m or m.group(2) != "candidato":
+                continue
+            partes = re.split(r"\s{2,}", m.group(3).strip())
+            if len(partes) < 3:
+                continue
+            try:
+                puntos = int(partes[0])
+            except ValueError:
+                continue
+            cand = {"puntos": puntos, "usuario": partes[1], "detalle": partes[2],
+                    "carpeta": "  ".join(partes[3:])}
+            vistos[(cand["usuario"], cand["carpeta"])] = cand   # la última ronda manda
+        return sorted(vistos.values(), key=lambda c: -c["puntos"])
 
 
 # ─── Trabajo en segundo plano ─────────────────────────────────────────────────
@@ -716,6 +966,13 @@ class Vista:
         return False
 
 
+def _sin_numero(archivo):
+    """'07 The Sign.flac' → 'The Sign': la columna ya lleva el número."""
+    nombre = os.path.splitext(archivo)[0]
+    limpio = re.sub(r"^\s*\d{1,3}\s*[-._]?\s*", "", nombre)
+    return limpio or nombre
+
+
 class VistaCola(Vista):
     nombre = "Cola"
 
@@ -745,6 +1002,7 @@ class VistaCola(Vista):
                 ("t", "todo" if not self.todo else "sólo activas"),
                 ("L", "limpiar")]
 
+    # ── la lista de la izquierda ──
     def dibujar(self, app, y0, alto, ancho):
         win = app.pantalla
         # Organizar no es cosa del FiiO: su progreso se ve aquí, con la cola.
@@ -763,129 +1021,454 @@ class VistaCola(Vista):
             escribir(win, y0 + 3, 10, " para pedir un álbum: «Artista - Álbum».", TENUE)
             return
 
-        self.cursor = max(0, min(self.cursor, len(lista) - 1))
-        visibles = max(1, alto // 2)
+        n = len(lista)
+        self.cursor = max(0, min(self.cursor, n - 1))
+        # Con sitio de sobra, una fila en blanco entre peticiones; si no, apretadas.
+        paso = 3 if alto >= n * 3 else 2
+        visibles = max(1, (alto - 2) // paso + 1)
+        if n > visibles and (visibles - 1) * paso + 2 > alto - 1:
+            visibles = max(1, visibles - 1)        # deja sitio al «↓ N más»
         if self.cursor < self.desplazado:
             self.desplazado = self.cursor
         if self.cursor >= self.desplazado + visibles:
             self.desplazado = self.cursor - visibles + 1
-        self.desplazado = max(0, min(self.desplazado, max(0, len(lista) - visibles)))
+        self.desplazado = max(0, min(self.desplazado, max(0, n - visibles)))
 
         for fila in range(visibles):
             indice = self.desplazado + fila
-            if indice >= len(lista):
+            if indice >= n:
                 break
-            self._fila(app, lista[indice], y0 + fila * 2, izq,
+            self._fila(app, lista[indice], y0 + fila * paso, izq,
                        indice == self.cursor)
+
+        ocultas = n - self.desplazado - visibles
+        partes = ([f"↑ {self.desplazado}"] if self.desplazado else []) + \
+                 ([f"↓ {ocultas}"] if ocultas > 0 else [])
+        pintadas = min(visibles, n - self.desplazado)
+        if partes and (pintadas - 1) * paso + 2 <= alto - 1:
+            escribir(win, y0 + alto - 1, 1, "  ".join(partes), TENUE)
 
         if doble:
             for y in range(y0, y0 + alto):
                 escribir(win, y, izq, "│", TENUE)
+            escribir(win, y0 - 1, izq, "┬", TENUE)
+            escribir(win, y0 + alto, izq, "┴", TENUE)
             self._detalle(app, self.seleccion(app), y0, alto, izq + 2, ancho - izq - 3)
 
     def _fila(self, app, pet, y, ancho, activa):
         win = app.pantalla
         estado = pet["estado"]
-        if activa:
-            pintar(win, y, 0, ancho, SEL)
-            pintar(win, y + 1, 0, ancho, SEL)
-        glifo = (girador() if estado == comun.BUSCANDO
-                 else GLIFO_ESTADO.get(estado, "·"))
-        color = SEL if activa else COLOR_ESTADO.get(estado, NORMAL)
-        escribir(win, y, 1, glifo, color)
+        t = time.monotonic()
+
+        # Recién terminada: la fila parpadea un par de segundos en su color.
+        fondo = None
+        cambio = app.datos.cambios.get(pet["id"])
+        if (cambio and estado in comun.TERMINADOS and t - cambio[1] < 2.4
+                and int((t - cambio[1]) * 4) % 2 == 0):
+            fondo = {comun.LISTO: MARCA, comun.FALLIDO: MARCA_ROJO}.get(estado, SEL)
+        elif activa:
+            fondo = SEL
+        if fondo is not None:
+            pintar(win, y, 0, ancho, fondo)
+            pintar(win, y + 1, 0, ancho, fondo)
+
+        if estado == comun.BUSCANDO:
+            glifo = girador(t)
+        elif estado == comun.PENDIENTE:
+            glifo = pulso(t)
+        else:
+            glifo = GLIFO_ESTADO.get(estado, "·")
+        escribir(win, y, 1, glifo, fondo if fondo is not None
+                 else COLOR_ESTADO.get(estado, NORMAL))
+
         titulo = pet["consulta"]
         if activa:
-            titulo = marquesina(titulo, ancho - 4)
-        escribir(win, y, 3, elipsis(titulo, ancho - 4),
-                 SEL if activa else (BLANCO if estado in comun.EN_CURSO else NORMAL))
+            titulo = marquesina(titulo, ancho - 4, t)
+        escribir(win, y, 3, elipsis(titulo, ancho - 4), fondo if fondo is not None
+                 else (BLANCO if estado in comun.EN_CURSO else NORMAL))
+        self._segunda_linea(app, pet, y + 1, 3, ancho - 4, fondo, t)
 
-        segunda, tinta = self._segunda_linea(app, pet)
-        escribir(win, y + 1, 3, elipsis(segunda, ancho - 4), SEL if activa else tinta)
-
-    def _segunda_linea(self, app, pet):
+    def _segunda_linea(self, app, pet, y, x, ancho, fondo, t):
+        """Debajo del título: la barra si está en marcha, el resultado si acabó."""
+        win = app.pantalla
         estado = pet["estado"]
-        if estado == comun.DESCARGANDO and pet.get("progreso"):
-            p = pet["progreso"]
+
+        def tinta(color):
+            return fondo if fondo is not None else color
+
+        if estado == comun.DESCARGANDO:
+            p = pet.get("progreso") or {}
             hechos, total = p.get("terminados", 0), p.get("total", 0) or 1
-            velocidad = app.datos.velocimetro.actual
-            return (f"{hechos}/{total} pistas · "
-                    f"{comun.formato_bytes(velocidad)}/s", AMBAR)
-        if estado == comun.LISTO and pet.get("resultado"):
+            frac = hechos / total
+            cola = f" {int(frac * 100):>3} %  {hechos}/{total}"
+            ancho_barra = max(6, ancho - len(cola))
+            barra(win, y, x, ancho_barra, frac, tinta(AMBAR), tinta(TENUE))
+            escribir(win, y, x + ancho_barra, cola, tinta(AMBAR))
+        elif estado == comun.BUSCANDO:
+            transcurrido = segundos_desde(pet.get("actualizado", ""))
+            frac = min(1.0, transcurrido / VENTANA_BUSQUEDA)
+            cola = (f" {int(transcurrido):>3} s" if transcurrido < VENTANA_BUSQUEDA
+                    else " eligiendo")
+            ancho_barra = max(6, ancho - len(cola))
+            barra(win, y, x, ancho_barra, frac, tinta(AZUL), tinta(TENUE))
+            escribir(win, y, x + ancho_barra, cola, tinta(AZUL))
+        elif estado == comun.PENDIENTE:
+            mensaje = pet.get("mensaje") or ""
+            reintento = mensaje.startswith("reintentando")
+            texto = mensaje if reintento else "esperando turno"
+            escribir(win, y, x, elipsis(f"{texto} · {desde(pet.get('actualizado', ''))}",
+                                        ancho), tinta(AMARILLO if reintento else TENUE))
+        elif estado == comun.LISTO and pet.get("resultado"):
             r = pet["resultado"]
             faltan = r.get("faltantes") or []
             if faltan:
-                return (f"{AVISO} falta " + ", ".join(f"{n:02d}" for n in faltan), AMARILLO)
-            return (f"{r['pistas']} pistas · {r['calidad']}", TENUE)
-        if pet.get("mensaje"):
-            return (pet["mensaje"], ROJO if estado == comun.FALLIDO else TENUE)
-        return (desde(pet.get("actualizado", "")), TENUE)
+                escribir(win, y, x, elipsis(f"{AVISO} falta " + ", ".join(
+                    f"{n:02d}" for n in faltan), ancho), tinta(AMARILLO))
+            else:
+                escribir(win, y, x, elipsis(f"{r['pistas']} pistas · {r['calidad']}", ancho),
+                         tinta(TENUE))
+        elif pet.get("mensaje"):
+            escribir(win, y, x, elipsis(pet["mensaje"], ancho),
+                     tinta(ROJO if estado == comun.FALLIDO else TENUE))
+        else:
+            escribir(win, y, x, desde(pet.get("actualizado", "")), tinta(TENUE))
 
+    # ── el detalle de la derecha ──
     def _detalle(self, app, pet, y0, alto, x, ancho):
-        win = app.pantalla
+        """Todo lo que se sabe de la petición, repartido según el sitio que haya:
+        ficha (a dos columnas si cabe), el bloque vivo del estado, y debajo
+        pistas, fuentes e historia; con mucho ancho, pistas a un lado y el
+        resto al otro."""
         if pet is None or ancho < 20:
             return
-        y = y0
-        escribir(win, y, x, elipsis(pet["consulta"], ancho), BLANCO)
-        y += 1
-        escribir(win, y, x, "─" * ancho, TENUE)
-        y += 1
+        win = app.pantalla
+        t = time.monotonic()
+        estado = pet["estado"]
+        tope = y0 + alto
 
-        def campo(etiqueta, valor, color=NORMAL):
-            nonlocal y
-            if y >= y0 + alto or not valor:
-                return
-            escribir(win, y, x, rellenar(etiqueta, 10), TENUE)
-            escribir(win, y, x + 10, elipsis(str(valor), ancho - 10), color)
-            y += 1
+        if estado == comun.BUSCANDO:
+            glifo = girador(t)
+        elif estado == comun.PENDIENTE:
+            glifo = pulso(t)
+        else:
+            glifo = GLIFO_ESTADO.get(estado, "·")
+        derecha = f"{glifo} {estado} · {desde(pet.get('actualizado', ''))}"
+        escribir(win, y0, x, elipsis(pet["consulta"], max(8, ancho - len(derecha) - 2)),
+                 BLANCO)
+        escribir(win, y0, x + ancho - len(derecha), derecha,
+                 COLOR_ESTADO.get(estado, NORMAL))
+        escribir(win, y0 + 1, x, "─" * ancho, TENUE)
+        y = y0 + 2
 
-        campo("estado", pet["estado"], COLOR_ESTADO.get(pet["estado"], NORMAL))
-        campo("tipo", "canción suelta" if pet.get("tipo") == "cancion" else "álbum")
-        campo("pedido", f"{hora_de(pet.get('creado',''))}  ({desde(pet.get('creado',''))})")
+        campos = self._campos(app, pet)
+        if alto < 18:
+            # Poca altura: se quedan los campos de más peso, en su orden.
+            limite = max(2, (alto - 2) // 3)
+            elegidos = set(id(c) for c in sorted(campos, key=lambda c: c[3])[:limite])
+            campos = [c for c in campos if id(c) in elegidos]
+        y = self._ficha(win, y, x, ancho, campos, tope)
+        y = self._vivo(app, pet, y, x, ancho, tope, t, holgado=alto >= 18)
 
-        candidato = pet.get("candidato") or {}
-        if candidato:
-            campo("fuente", f"{candidato.get('usuario','?')}"
-                            f"   {candidato.get('puntos','?')} pts", AMBAR)
-            campo("carpeta", os.path.basename(
-                (candidato.get("carpeta") or "").replace("\\", "/")))
-            campo("calidad", candidato.get("detalle", ""))
-        if pet.get("rechazados"):
-            campo("descartes", f"{len(pet['rechazados'])} fuente(s)", TENUE)
+        secciones = [s for s in (self._pistas(app, pet, ancho, t),
+                                 self._fuentes(app, pet, ancho),
+                                 self._historia(app, pet, ancho))
+                     if s is not None]
+        resto = tope - y
+        if not secciones or resto < 3:
+            return
+        lado_a_lado = (ancho >= 110 and resto >= 12 and len(secciones) > 1
+                       and secciones[0][0].startswith("pistas"))
+        if lado_a_lado:
+            col = (ancho - 3) // 2
+            self._apilar(win, y, x, col, resto, secciones[:1])
+            for yy in range(y + 1, tope):
+                escribir(win, yy, x + col + 1, "│", TENUE)
+            self._apilar(win, y, x + col + 3, ancho - col - 3, resto, secciones[1:])
+        else:
+            self._apilar(win, y, x, ancho, resto, secciones)
 
-        progreso = pet.get("progreso") or {}
-        if pet["estado"] == comun.DESCARGANDO and progreso:
-            hechos = progreso.get("terminados", 0)
-            total = progreso.get("total", 0) or 1
-            y += 1
-            if y < y0 + alto:
-                escribir(win, y, x, rellenar("progreso", 10), TENUE)
-                ancho_barra = max(8, ancho - 10 - 8)
-                barra(win, y, x + 10, ancho_barra, hechos / total)
-                escribir(win, y, x + 10 + ancho_barra + 1,
-                         f"{int(hechos / total * 100):>3} %", AMBAR)
-                y += 1
-            velocidad = app.datos.velocimetro
-            if y < y0 + alto:
-                escribir(win, y, x, rellenar("velocidad", 10), TENUE)
-                texto = f"{comun.formato_bytes(velocidad.actual)}/s"
-                escribir(win, y, x + 10, rellenar(texto, 12), BLANCO)
-                escribir(win, y, x + 22, chispa(velocidad.historial, ancho - 24), AZUL)
-                y += 1
+    @staticmethod
+    def _ficha(win, y, x, ancho, campos, tope):
+        if not campos or y >= tope:
+            return y
+        if ancho >= 84:
+            col = (ancho - 3) // 2
+            mitad = (len(campos) + 1) // 2
+            columnas = [campos[:mitad], campos[mitad:]]
+            xs = [x, x + col + 3]
+        else:
+            col, columnas, xs = ancho, [campos], [x]
+        filas = max(len(c) for c in columnas)
+        for i in range(filas):
+            if y + i >= tope:
+                break
+            for cx, c in zip(xs, columnas):
+                if i < len(c):
+                    etiqueta, valor, color, _peso = c[i]
+                    escribir(win, y + i, cx, rellenar(etiqueta, 10), TENUE)
+                    escribir(win, y + i, cx + 10, elipsis(str(valor), col - 10), color)
+        return y + min(filas, tope - y)
 
+    def _campos(self, app, pet):
+        """(etiqueta, valor, color, peso). El peso decide qué sobrevive cuando
+        hay poca altura: 1 lo esencial, 2 lo útil, 3 lo prescindible."""
+        estado = pet["estado"]
+        creado = pet.get("creado", "")
+        campos = [("pedido", f"{hora_de(creado)} · {desde(creado)}", NORMAL, 2),
+                  ("tipo", "canción suelta" if pet.get("tipo") == "cancion" else "álbum",
+                   NORMAL, 3)]
+        if estado == comun.BUSCANDO:
+            consulta = pet["consulta"]
+            termino = consulta if "flac" in consulta.casefold() else f"{consulta} flac"
+            campos.append(("término", termino, AZUL, 1))
+        if estado == comun.PENDIENTE:
+            activas = [p["id"] for p in app.datos.activas()]
+            delante = activas.index(pet["id"]) if pet["id"] in activas else 0
+            campos.append(("turno", "es la siguiente" if delante == 0
+                           else f"{delante} por delante", AMARILLO, 1))
+        cand = pet.get("candidato") or {}
+        if cand:
+            campos.append(("fuente", f"{cand.get('usuario', '?')} · "
+                                     f"{cand.get('puntos', '?')} pts", AMBAR, 1))
+            campos.append(("carpeta", os.path.basename(
+                (cand.get("carpeta") or "").replace("\\", "/")), NORMAL, 3))
+            campos.append(("calidad", cand.get("detalle", ""), NORMAL,
+                           1 if estado == comun.DESCARGANDO else 2))
         resultado = pet.get("resultado") or {}
         if resultado:
-            y += 1
-            campo("destino", resultado.get("carpeta", ""), VERDE)
-            campo("pistas", f"{resultado.get('pistas','?')} · "
-                            f"{resultado.get('calidad','')}")
+            campos.append(("destino", resultado.get("carpeta", ""), VERDE, 1))
             if resultado.get("faltantes"):
-                campo("faltan", ", ".join(f"{n:02d}" for n in resultado["faltantes"]),
-                      AMARILLO)
+                campos.append(("faltan", ", ".join(
+                    f"{n:02d}" for n in resultado["faltantes"]), AMARILLO, 1))
+        if estado in comun.TERMINADOS:
+            tardo = duracion_entre(creado, pet.get("actualizado", ""))
+            if tardo:
+                campos.append(("tardó", tardo, TENUE, 2))
+        if pet.get("intentos"):
+            campos.append(("intentos", f"{pet['intentos']} agotado(s)", AMARILLO, 3))
+        if pet.get("rechazados"):
+            campos.append(("descartes", f"{len(pet['rechazados'])} fuente(s)", TENUE, 3))
+        mensaje = pet.get("mensaje") or ""
+        if mensaje and estado in (comun.FALLIDO, comun.CANCELADO):
+            campos.append(("motivo" if estado == comun.FALLIDO else "nota", mensaje,
+                           ROJO if estado == comun.FALLIDO else TENUE, 1))
+        return campos
 
-        if pet.get("mensaje") and y < y0 + alto:
+    def _vivo(self, app, pet, y, x, ancho, tope, t, holgado=True):
+        """Lo que se mueve: la barra de descarga, la cuenta de la búsqueda o el
+        pulso de la espera. Cada estado en marcha tiene el suyo."""
+        win = app.pantalla
+        estado = pet["estado"]
+        if tope - y < 2:
+            return y
+        hueco = 1 if holgado else 0
+
+        if estado == comun.DESCARGANDO:
+            y += hueco
+            p = pet.get("progreso") or {}
+            hechos, total = p.get("terminados", 0), p.get("total", 0) or 1
+            frac = hechos / total
+            cola = f"  {int(frac * 100):>3} %  {hechos} de {total} pistas"
+            ancho_barra = max(8, min(60, ancho - 10 - len(cola)))
+            escribir(win, y, x, rellenar("progreso", 10), TENUE)
+            barra(win, y, x + 10, ancho_barra, frac)
+            escribir(win, y, x + 10 + ancho_barra, cola, AMBAR)
             y += 1
-            escribir(win, y, x, elipsis(pet["mensaje"], ancho),
-                     ROJO if pet["estado"] == comun.FALLIDO else TENUE)
+            if y < tope:
+                v = app.datos.velocimetro
+                escribir(win, y, x, rellenar("velocidad", 10), TENUE)
+                xx = escribir(win, y, x + 10,
+                              rellenar(f"{comun.formato_bytes(v.actual)}/s", 11), BLANCO)
+                # Por orden de prioridad: el contador (a la derecha), el
+                # medidor y, si aún sobra sitio, la chispa; ésta ya va en la
+                # barra de estado, así que es la primera que se cae.
+                bajado = f"{comun.formato_bytes(v.estimado())} bajados"
+                fin = x + ancho
+                if fin - xx >= len(bajado) + 10:
+                    escribir(win, y, fin - len(bajado), bajado, TENUE)
+                    fin -= len(bajado) + 2
+                sitio = fin - xx
+                if sitio >= 8:
+                    xx = escribir(win, y, xx, medidor(v, min(16, sitio), t), AMBAR) + 2
+                sitio = fin - xx
+                if sitio >= 8:
+                    escribir(win, y, xx, chispa(v.historial, min(30, sitio)), AZUL)
+                y += 1
+
+        elif estado == comun.BUSCANDO:
+            y += hueco
+            transcurrido = segundos_desde(pet.get("actualizado", ""))
+            frac = min(1.0, transcurrido / VENTANA_BUSQUEDA)
+            if transcurrido < VENTANA_BUSQUEDA:
+                cola = f"  {int(transcurrido):>2} s de {VENTANA_BUSQUEDA} · acumulando resultados"
+                color = AZUL
+            elif transcurrido < VENTANA_BUSQUEDA + 6:
+                cola, color = "  puntuando lo que llegó", AZUL
+            else:
+                cola = (f"  sin resultados aún · el plugin espera hasta "
+                        f"{VENTANA_BUSQUEDA * 3} s")
+                color = AMARILLO
+            ancho_barra = max(8, min(40, ancho - 12 - len(cola)))
+            escribir(win, y, x, rellenar("búsqueda", 10), TENUE)
+            escribir(win, y, x + 10, girador(t), AZUL)
+            barra(win, y, x + 12, ancho_barra, frac, AZUL)
+            escribir(win, y, x + 12 + ancho_barra, elipsis(cola, ancho - 12 - ancho_barra),
+                     color)
+            y += 1
+
+        elif estado == comun.PENDIENTE:
+            y += hueco
+            escribir(win, y, x, rellenar("turno", 10), TENUE)
+            if app.datos.nicotine_vivo():
+                texto = f"{pulso(t)} esperando a que el plugin la tome"
+                color = TENUE
+            else:
+                texto = f"{AVISO} Nicotine+ está cerrado: la cola no avanza"
+                color = AMARILLO
+            escribir(win, y, x + 10, elipsis(texto, ancho - 10), color)
+            y += 1
+        return y
+
+    # ── las tres secciones: (título, filas, foco) o None ──
+    def _pistas(self, app, pet, ancho, t):
+        estado = pet["estado"]
+        if estado == comun.DESCARGANDO:
+            return self._pistas_bajando(app, pet, ancho, t)
+        if estado != comun.LISTO:
+            return None
+        carpeta = (pet.get("resultado") or {}).get("carpeta")
+        if not carpeta:
+            return None
+        ruta = os.path.join(comun.RAIZ_BIBLIOTECA, carpeta)
+        if not os.path.isdir(ruta):
+            return ("pistas", [([(f"{AVISO} la carpeta ya no está en {carpeta}", AMARILLO)], [])],
+                    None)
+        app.biblioteca.pedir_analisis({"dir": ruta})
+        det = app.biblioteca.detalle.get(ruta)
+        if det is None:
+            return ("pistas", [([(f"{girador(t)} leyendo las pistas…", AZUL)], [])], None)
+
+        pistas = sorted(det["pistas"], key=lambda p: (p.get("disco") or 1, p.get("pista") or 0))
+        faltan = set(det.get("huecos") or [])
+        filas, total = [], 0
+        for p in pistas:
+            n = p.get("pista")
+            while faltan and min(faltan) < (n or 0):
+                h = min(faltan)
+                faltan.discard(h)
+                filas.append(([(f"{h:02d}  ", AMARILLO), ("— falta —", AMARILLO)], []))
+            total += p.get("tamaño", 0)
+            filas.append(([(f"{n:02d}  " if n else "··  ", TENUE),
+                           (p.get("titulo") or p["archivo"], NORMAL)],
+                          [(duracion(p.get("duracion")), TENUE), ("  ", None),
+                           (f"{comun.formato_bytes(p.get('tamaño', 0)):>9}", TENUE),
+                           ("  ", None), (OK, VERDE)]))
+        for h in sorted(faltan):
+            filas.append(([(f"{h:02d}  ", AMARILLO), ("— falta —", AMARILLO)], []))
+        if not filas:
+            filas.append(([(det.get("calidad") or "sin pistas legibles", AMARILLO)], []))
+        titulo = f"pistas · {len(pistas)} · {det.get('calidad', '')} · {comun.formato_bytes(total)}"
+        return (titulo, filas, None)
+
+    def _pistas_bajando(self, app, pet, ancho, t):
+        datos = app.datos
+        p = pet.get("progreso") or {}
+        total = p.get("total", 0) or 0
+        hechos = max(p.get("terminados", 0), len(datos.bajados))
+        filas = []
+        for i, (nombre, b) in enumerate(datos.bajados, 1):
+            filas.append(([(f"{i:02d}  ", TENUE), (_sin_numero(nombre), NORMAL)],
+                          [(f"{comun.formato_bytes(b):>9}", TENUE), ("  ", None), (OK, VERDE)]))
+        foco = None
+        v = datos.velocimetro
+        for nombre, b in datos.incompletos:
+            estimado = b + v.actual * max(0.0, time.monotonic() - datos.muestreado_en)
+            foco = len(filas)
+            filas.append(([(f"{len(filas) + 1:02d}  ", BLANCO),
+                           (_sin_numero(nombre), BLANCO)],
+                          barrido(10 if ancho >= 50 else 6, t)
+                          + [(f" {comun.formato_bytes(estimado):>9}", AMBAR)]))
+        pendientes = total - len(filas)
+        for _i in range(max(0, pendientes)):
+            filas.append(([(f"{len(filas) + 1:02d}  ", TENUE), ("pendiente", TENUE)],
+                          [(GLIFO_ESTADO[comun.PENDIENTE], TENUE)]))
+        if not filas:
+            filas.append(([(f"{girador(t)} esperando al primer archivo…", TENUE)], []))
+        titulo = f"pistas · {hechos} de {total} bajadas"
+        return (titulo, filas, foco)
+
+    def _fuentes(self, app, pet, ancho):
+        candidatos = app.datos.candidatos(pet["id"])
+        if not candidatos:
+            return None
+        cand = pet.get("candidato") or {}
+        elegida = (cand.get("usuario"),
+                   os.path.basename((cand.get("carpeta") or "").replace("\\", "/")))
+        descartadas = {(u, os.path.basename((c or "").replace("\\", "/")))
+                       for u, c in (pet.get("rechazados") or [])}
+        filas = []
+        for c in candidatos:
+            clave = (c["usuario"], c["carpeta"])
+            es_elegida = clave == elegida
+            es_descartada = clave in descartadas
+            izq = [(f"{c['puntos']:>4}  ", AMBAR if es_elegida else TENUE),
+                   (rellenar(c["usuario"], 16) + "  ", BLANCO if es_elegida else NORMAL)]
+            if ancho >= 56:
+                izq.append((rellenar(c["detalle"], 28) + "  ", TENUE))
+            if ancho >= 84:
+                izq.append((c["carpeta"], TENUE))
+            corto = ancho < 70
+            der = ([("◂" if corto else "◂ elegida", AMBAR)] if es_elegida
+                   else [(MAL if corto else f"{MAL} descartada", ROJO)] if es_descartada
+                   else [])
+            filas.append((izq, der))
+        return (f"fuentes · {len(filas)} candidatas", filas, None)
+
+    def _historia(self, app, pet, ancho):
+        lineas = app.datos.historia(pet["id"])
+        filas = []
+        for linea in lineas:
+            m = PATRON_LOG.match(linea)
+            if not m:
+                continue
+            marca, etiqueta, resto = m.groups()
+            if etiqueta == "candidato":
+                continue                       # eso ya está en «fuentes»
+            resto = (resto.replace("/" + pet["id"], "").replace(pet["id"], "")
+                          .replace(comun.DIR_DESCARGAS, ".descargas")
+                          .replace(comun.RAIZ_BIBLIOTECA + "/", ""))
+            resto = re.sub(r"\s{2,}", " ", resto).strip(" :")
+            color = VistaLog.ETIQUETAS.get(etiqueta.split()[0], NORMAL)
+            hora = marca[11:19] if len(marca) > 18 else marca
+            filas.append(([(hora + "  ", TENUE), (rellenar(etiqueta, 10) + " ", color),
+                           (resto, NORMAL)], []))
+        if not filas:
+            return None
+        if pet["estado"] in comun.EN_CURSO:
+            izq, der = filas[-1]
+            filas[-1] = ([izq[0], izq[1], (izq[2][0], BLANCO)], der)
+        return (f"historia · {len(filas)} líneas", filas, len(filas) - 1)
+
+    @staticmethod
+    def _apilar(win, y, x, ancho, alto, secciones):
+        """Reparte `alto` filas entre las secciones: cada una recibe hasta 4 de
+        entrada y lo que sobre se reparte por orden. Cada sección empieza con
+        una fila en blanco."""
+        necesidades = [len(filas) + 2 for _t, filas, _f in secciones]
+        alturas = [0] * len(secciones)
+        libre = alto
+        for i, n in enumerate(necesidades):
+            alturas[i] = min(n, 4, libre)
+            libre -= alturas[i]
+        for i, n in enumerate(necesidades):
+            extra = min(n - alturas[i], libre)
+            alturas[i] += extra
+            libre -= extra
+        for (titulo, filas, foco), h in zip(secciones, alturas):
+            if h < 3:
+                continue
+            pintar_seccion(win, y + 1, x, ancho, h - 1, titulo, filas, foco)
+            y += h
 
     def tecla(self, app, k):
         lista = self.lista(app)
@@ -1027,9 +1610,11 @@ class VistaBiblioteca(Vista):
         anchos = self._anchos(ancho)
         x = 0
         for col in range(3):
-            if col:
+            if col and anchos[col] > 0:
                 for y in range(y0, y0 + alto):
                     escribir(win, y, x, "│", TENUE)
+                escribir(win, y0 - 1, x, "┬", TENUE)
+                escribir(win, y0 + alto, x, "┴", TENUE)
                 x += 1
             self._columna(app, col, y0, alto, x, anchos[col])
             x += anchos[col]
@@ -1322,9 +1907,14 @@ class VistaFiio(Vista):
                      f"{comun.formato_bytes(trabajo.hechos_bytes)} de "
                      f"{comun.formato_bytes(trabajo.total_bytes)}", TENUE)
             velocidad = f"{comun.formato_bytes(trabajo.velocimetro.actual)}/s"
-            escribir(win, y, max(13, ancho - len(velocidad) - 22), velocidad, BLANCO)
-            escribir(win, y, max(14, ancho - 20), chispa(trabajo.velocimetro.historial, 18),
-                     AZUL)
+            xx = escribir(win, y, max(13, ancho - len(velocidad) - 40), velocidad, BLANCO) + 2
+            sitio = ancho - 2 - xx
+            if sitio >= 14:
+                xx = escribir(win, y, xx, medidor(trabajo.velocimetro, min(14, sitio - 2)),
+                              AMBAR) + 2
+            sitio = ancho - 2 - xx
+            if sitio >= 8:
+                escribir(win, y, xx, chispa(trabajo.velocimetro.historial, min(22, sitio)), AZUL)
             y += 2
 
         if trabajo.album:
@@ -1439,7 +2029,7 @@ class VistaLog(Vista):
         "listo": VERDE, "buscar": AZUL, "cola": AZUL, "plugin": VIOLETA,
         "reintento": AMARILLO, "error": ROJO, "descartado": TENUE,
     }
-    PATRON = re.compile(r"^(\S+)\s+\[([^\]]+)\]\s*(.*)$")
+    PATRON = PATRON_LOG
 
     def __init__(self):
         self.desplazado = 0
@@ -1931,6 +2521,7 @@ class App:
         self.overlay = None
         self._aviso = ""
         self._aviso_color = NORMAL
+        self._aviso_desde = 0.0
         self._aviso_hasta = 0.0
         self.salir = False
 
@@ -1961,7 +2552,8 @@ class App:
     def avisar(self, texto, color=NORMAL, segundos=4.0):
         self._aviso = texto
         self._aviso_color = color
-        self._aviso_hasta = time.monotonic() + segundos
+        self._aviso_desde = time.monotonic()
+        self._aviso_hasta = self._aviso_desde + segundos
 
     # ── acciones ──
     def pedir(self, consultas, cancion=False):
@@ -2243,12 +2835,13 @@ class App:
         self._cabecera(ancho)
         self._pestanas(ancho)
         escribir(win, 2, 0, "─" * ancho, TENUE)
+        escribir(win, alto - 3, 0, "─" * ancho, TENUE)
+        self._eventos()
 
         cuerpo_y = 3
         cuerpo_alto = alto - 6
         self.vista().dibujar(self, cuerpo_y, cuerpo_alto, ancho)
 
-        escribir(win, alto - 3, 0, "─" * ancho, TENUE)
         self._estado(alto - 2, ancho)
         self._teclas(alto - 1, ancho)
 
@@ -2298,11 +2891,49 @@ class App:
         if texto:
             escribir(win, 1, max(x + 2, ancho - len(texto) - 1), texto, TENUE)
 
+    def _eventos(self):
+        """Avisos automáticos cuando una petición cambia de estado."""
+        while self.datos.eventos:
+            p = self.datos.eventos.popleft()
+            estado = p["estado"]
+            if estado == comun.LISTO:
+                r = p.get("resultado") or {}
+                self.avisar(f"{OK} {p['consulta']} · {r.get('pistas', '?')} pistas · "
+                            f"{r.get('calidad', '')}", VERDE, 6)
+            elif estado == comun.FALLIDO:
+                self.avisar(f"{MAL} {p['consulta']} · {p.get('mensaje') or 'falló'}", ROJO, 8)
+            elif estado == comun.DESCARGANDO:
+                c = p.get("candidato") or {}
+                self.avisar(f"↓ {p['consulta']} · de {c.get('usuario', '?')} · "
+                            f"{c.get('detalle', '')}", AMBAR, 5)
+            elif estado == comun.PENDIENTE and (p.get("mensaje") or "").startswith("reintentando"):
+                self.avisar(f"{AVISO} {p['consulta']} · {p['mensaje']}", AMARILLO, 6)
+
     def _estado(self, y, ancho):
-        win = self.pantalla
-        if self._aviso and time.monotonic() < self._aviso_hasta:
-            escribir(win, y, 1, elipsis(self._aviso, ancho - 2), self._aviso_color, True)
+        self._estado_base(y, ancho)
+        self._aviso_animado(y, ancho)
+
+    def _aviso_animado(self, y, ancho):
+        """El aviso entra por la derecha, se queda y se va por donde vino."""
+        t = time.monotonic()
+        if not self._aviso or t >= self._aviso_hasta:
             return
+        texto = elipsis(f" {self._aviso} ", max(4, ancho - 2))
+        largo = len(texto)
+        entrada = salida = 0.4
+        desde_inicio = t - self._aviso_desde
+        hasta_fin = self._aviso_hasta - t
+        if desde_inicio < entrada:
+            fuera = int((1 - desde_inicio / entrada) ** 2 * largo)
+        elif hasta_fin < salida:
+            fuera = int((1 - hasta_fin / salida) ** 2 * largo)
+        else:
+            fuera = 0
+        escribir(self.pantalla, y, ancho - 1 - largo + fuera, texto,
+                 FONDO_DE.get(self._aviso_color, SEL), True)
+
+    def _estado_base(self, y, ancho):
+        win = self.pantalla
         if self.reproductor.sonando:
             transcurrido = self.reproductor.transcurrido()
             total = self.reproductor.duracion

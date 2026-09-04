@@ -88,6 +88,18 @@ en la vista en la que estás**. No hay nada que memorizar.
 La navegación es **con flechas**; no hay atajos estilo vim. `?` abre la ayuda
 entera, `:` una paleta con todas las órdenes buscando por nombre, `q` sale.
 
+En la cola, el panel de la derecha **se reparte según el sitio que haya**: la
+ficha va a dos columnas cuando cabe y debajo aparecen las **pistas** del álbum
+(mientras baja, cayendo una a una, con la que está en curso y sus bytes
+subiendo), la **tabla de fuentes** que puntuó el plugin (la elegida, las
+descartadas y por cuántos puntos) y la **historia** de esa petición sacada de
+`pipeline.log`. Con la terminal muy ancha, pistas a un lado y fuentes e
+historia al otro; con poca altura se quedan sólo los campos que pesan. Todo lo
+que se mueve mide algo real: el medidor VU y la chispa salen de los bytes por
+segundo, la cuenta de la búsqueda son los 45 s que el plugin acumula
+resultados, y las peticiones en espera «respiran». Cuando un álbum termina, un
+aviso entra deslizándose por la derecha y la fila parpadea en verde.
+
 En la biblioteca, `espacio` marca álbumes y `c` los manda a la tarjeta en ese
 orden; `p` reproduce la pista seleccionada con el primer reproductor que
 encuentre (`mpv`, `gst-play-1.0`, `pw-play`, `ffplay` o `mplayer`) y `s` la para.
@@ -251,10 +263,18 @@ las entradas de un directorio.
 | `flacpipe` | CLI |
 | `flacpipe_tui.py` | La interfaz a pantalla completa (curses) |
 | `instalar.sh` | Instalador |
+| `pruebas/probar.py` | Banco de pruebas de la interfaz: la corre en un pty y captura la pantalla |
 
 La interfaz vive fuera de `flac_hunter/` a propósito: nunca la carga Nicotine+,
 sólo lee `cola.json` y `pipeline.log` con el mismo `flock` que todo lo demás, y
 lanza el trabajo pesado en un hilo. **El plugin no sabe que existe.**
+
+Para ver la interfaz sin abrirla, `python3 pruebas/probar.py` la lanza dentro
+de un pty en tres tamaños de terminal, le manda teclas y guarda capturas de
+texto (con un mapa de colores al lado) en `pruebas/salida/capturas/`. Con
+`real` usa tu cola de verdad, sólo lectura; con `falso` simula una descarga
+que avanza, una búsqueda, una espera y un álbum que termina; con `fiio`, una
+copia a una tarjeta inventada. No escribe nada en `~/Música`.
 
 Los módulos compartidos llevan prefijo `fh_` porque Nicotine+ carga los plugins
 haciendo `sys.path.append(carpeta_del_plugin)`: los imports son absolutos y un
