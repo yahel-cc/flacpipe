@@ -42,30 +42,81 @@ De ahí las dos reglas que gobiernan todo el proyecto:
 
 ## Requisitos
 
-- Linux con Nicotine+ 3.3.x (probado con el snap 3.3.10) y una cuenta de Soulseek.
-- Python 3.8+. **Sin dependencias externas**: los tags Vorbis y el bloque
-  STREAMINFO se leen a mano, porque el plugin corre dentro del snap y ahí no hay pip.
+- Nicotine+ 3.3.x con una cuenta de Soulseek, en **Linux** (snap, flatpak o
+  paquete nativo; probado con el snap 3.3.10), **macOS** (la app) o **Windows**
+  (el instalador oficial).
+- Python 3.8+ para la CLI y la interfaz. **Sin dependencias externas**: los tags
+  Vorbis y el bloque STREAMINFO se leen a mano, porque el plugin corre dentro del
+  Python de Nicotine+ (el del snap, el del `.app` o el del `.exe`) y ahí no hay
+  pip. La única excepción es Windows, donde la interfaz necesita
+  `windows-curses`; el instalador lo pone.
 
 ## Instalación
 
 ```bash
 git clone git@github.com:yahel-cc/flacpipe.git
 cd flacpipe
-bash instalar.sh      # con Nicotine+ CERRADO
+bash instalar.sh      # Linux y macOS, con Nicotine+ CERRADO
+instalar.bat          # Windows: doble clic, o desde una terminal
 ```
 
-El instalador:
+Los dos llaman a `instalar.py`, que sólo usa la biblioteca estándar y hace,
+en este orden:
 
-- enlaza `flac_hunter/` en la carpeta de plugins del snap (**enlace simbólico**:
-  editas el código aquí y basta reiniciar Nicotine+, no hay que reinstalar);
-- añade `flac_hunter` a los plugins habilitados de Nicotine+;
-- apunta `downloaddir` a `~/Música/.descargas`, para que una descarga manual no
-  ensucie la raíz de la biblioteca;
-- enlaza `flacpipe` en `~/.local/bin`.
+1. localiza Nicotine+: el snap, el flatpak o el paquete nativo en Linux, la app
+   en macOS, `%APPDATA%\nicotine` en Windows. Si hay varios, gana el que haya
+   escrito su config más recientemente; si ninguno se ha abierto aún, el que
+   esté instalado;
+2. decide dónde está la biblioteca (la carpeta de música del sistema: `xdg-user-dir
+   MUSIC` en Linux, `~/Music` en macOS y Windows) y la escribe en
+   `flac_hunter/flacpipe.json`, que es lo único que leen el plugin, la CLI y la
+   interfaz para saber dónde trabajar;
+3. enlaza `flac_hunter/` en la carpeta de plugins de Nicotine+ (**enlace
+   simbólico**, o una *junction* en Windows, que no pide permisos de
+   administrador: editas el código aquí y basta reiniciar Nicotine+). Si no se
+   puede enlazar, copia, y entonces hay que reinstalar tras cada cambio;
+4. añade `flac_hunter` a los plugins habilitados de Nicotine+ y apunta
+   `downloaddir` a `<biblioteca>/.descargas`, para que una descarga manual no
+   ensucie la raíz de la biblioteca. La config original queda al lado como
+   `config.antes-de-flacpipe`. Si Nicotine+ nunca se ha abierto, escribe una
+   config mínima con sólo eso, que Nicotine+ completa al arrancar;
+5. deja el comando `flacpipe` a mano: enlace en `~/.local/bin` (y se ofrece a
+   añadirlo al PATH en tu `.zshrc`/`.bashrc` si no está) o
+   `%LOCALAPPDATA%\flacpipe\bin\flacpipe.cmd` más el PATH del usuario en Windows;
+6. en Windows, `pip install windows-curses`;
+7. crea `.pipeline` y `.descargas` dentro de la biblioteca y comprueba con un
+   intérprete limpio que todo importa y que el plugin instalado responde.
 
-Las rutas están fijas en `flac_hunter/fh_comun.py` (`RAIZ_BIBLIOTECA`) y en
-`instalar.sh`. Si tu usuario no es `yahel` o tu música no está en `~/Música`,
-cámbialas ahí.
+Se puede repetir las veces que haga falta (también tras mover la carpeta del
+código, para repuntar los enlaces). Opciones:
+
+| Opción | Para qué |
+|---|---|
+| `--biblioteca RUTA` | La música no está en la carpeta habitual |
+| `--simular` / `-n` | Enseñar qué haría sin tocar nada |
+| `--quitar` | Desinstalar: quita el plugin, el comando y `flacpipe.json`; no toca la música ni la cola |
+| `--copiar` | Copiar el plugin en vez de enlazarlo |
+| `--nicotine-datos DIR` | Carpeta de datos de Nicotine+ (la que contiene `plugins/`) si la detección no acierta |
+| `--si` / `-y` | No preguntar nada |
+
+### Dónde está la biblioteca
+
+`flac_hunter/flacpipe.json` (lo escribe el instalador, no va en git):
+
+```json
+{
+  "biblioteca": "/home/yahel/Música",
+  "nicotine": {"sabor": "snap", "config": "…/config", "datos": "…/nicotine"},
+  "ignorar": []
+}
+```
+
+`ignorar` son carpetas de primer nivel de la biblioteca que no son artistas
+(además de `.pipeline`, `.descargas`, `Artistas` y lo que dejan iTunes y
+compañía en `~/Music`). La variable de entorno `FLACPIPE_BIBLIOTECA` manda
+sobre el archivo, pero sólo la ve la CLI: el plugin, confinado, lee el JSON.
+Vive junto al código y no en `~/.config` porque es el único sitio que ven a la
+vez el plugin dentro del snap y la CLI fuera.
 
 ## La interfaz
 
@@ -255,9 +306,11 @@ flacpipe fiio --rehacer "Nujabes/Modal Soul"
 flacpipe fiio --desmontar
 ```
 
-Detecta la tarjeta sola buscando montajes FAT/exFAT/NTFS bajo `/run/media`,
-`/media` y `/mnt`. Copia un archivo a la vez, con `fsync` de cada uno y `sync`
-tras cada álbum, para que la entrada de directorio quede escrita antes de crear la
+Detecta la tarjeta sola buscando montajes FAT/exFAT/NTFS: bajo `/run/media`,
+`/media` y `/mnt` en Linux, en `/Volumes` en macOS, y entre las unidades
+extraíbles (o fijas pero FAT, que es como aparecen algunos lectores) en
+Windows. Copia un archivo a la vez, con `fsync` de cada uno y `sync` tras cada
+álbum, para que la entrada de directorio quede escrita antes de crear la
 siguiente. La carátula se copia al final, para no ocupar una entrada antes de las
 pistas.
 
@@ -277,7 +330,7 @@ dice nada, así que se salta sola.
 | `--rehacer` | Borrar y reescribir álbumes que ya estén, para forzar el orden |
 | `--simular` / `-n` | Sólo enseñar el plan |
 | `--si` / `-y` | No preguntar |
-| `--desmontar` | `sync` y desmontar al terminar |
+| `--desmontar` | `sync` y desmontar al terminar (`udisksctl`, `diskutil` o la expulsión de Windows) |
 
 Si un álbum ya está en la tarjeta pero desordenado (copiado antes arrastrándolo),
 `--rehacer` lo borra y lo reescribe: en FAT/exFAT no hay otra forma de reordenar
@@ -293,9 +346,10 @@ las entradas de un directorio.
 | `flac_hunter/fh_fiio.py` | Copia secuencial y verificación del orden físico |
 | `flac_hunter/fh_listas.py` | Playlists en CSV → peticiones; qué se tiene ya |
 | `flac_hunter/PLUGININFO` | Metadatos que lee Nicotine+ |
+| `flac_hunter/flacpipe.json` | Dónde están la biblioteca y Nicotine+ (lo genera el instalador; no va en git) |
 | `flacpipe` | CLI |
 | `flacpipe_tui.py` | La interfaz a pantalla completa (curses) |
-| `instalar.sh` | Instalador |
+| `instalar.py` | Instalador para los tres sistemas; `instalar.sh` e `instalar.bat` sólo lo lanzan |
 | `pruebas/probar.py` | Banco de pruebas de la interfaz: la corre en un pty y captura la pantalla |
 
 La interfaz vive fuera de `flac_hunter/` a propósito: nunca la carga Nicotine+,
@@ -352,14 +406,25 @@ En Nicotine+ → Preferencias → Plugins → FLAC Hunter:
 - **Confinamiento del snap**: la interfaz `home` permite `@{HOME}/[^.]*/**`, o sea
   carpetas ocultas *dentro* de `~/Música` sí, pero no colgando directamente de
   `$HOME`. Además, dentro del snap `$HOME` es `~/snap/nicotine-plus/<rev>/`, así que
-  todas las rutas compartidas son absolutas.
+  todas las rutas compartidas son absolutas (el HOME real está en
+  `SNAP_REAL_HOME`). El flatpak, en cambio, tiene `--filesystem=home` entero.
+- **Lo que cambia por sistema vive en `fh_comun` y `fh_fiio`**: el bloqueo de la
+  cola (`flock` o `msvcrt.locking`), cómo se encuentra el proceso de Nicotine+
+  (`/proc`, `ps` o `tasklist`), cómo se abre, y cómo se listan los montajes
+  (`/proc/mounts`, `mount` o `GetLogicalDrives`). El resto del código no
+  pregunta en qué sistema está.
 - **Los errores de un plugin los traga `events.emit`**, que llama a
   `show_plugin_error` y sigue. Por eso todo el ciclo va envuelto en `try/except`
   con log propio: si no, el plugin fallaría en silencio.
 
 ## Limitaciones conocidas
 
-- Rutas fijas para un solo usuario; no hay archivo de configuración.
+- En macOS y Windows el código está portado pero **sin probar en una máquina
+  real**: sólo se ha ejecutado en Linux (snap). Lo más probable que falle allí es
+  la detección de la tarjeta y la interfaz en Windows, que depende de
+  `windows-curses` y de que la terminal pinte los glifos (Windows Terminal sí).
+- En Windows la tecla `p` de la biblioteca sólo suena si hay `mpv` o `ffplay`
+  en el PATH; en macOS usa `afplay`, que viene de serie.
 - El plugin sólo avanza mientras Nicotine+ está abierto.
 - Si a un álbum le faltan pistas y ninguna fuente lo tiene completo, se guarda
   incompleto tras 3 intentos (queda marcado, y `flacpipe revisar` lo lista).

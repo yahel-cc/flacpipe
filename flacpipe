@@ -26,6 +26,13 @@ import fh_comun as comun             # noqa: E402
 import fh_fiio as fiio               # noqa: E402
 import fh_listas as listas           # noqa: E402
 
+# Los glifos (✓ ⧗ ↓) revientan en una consola que no sea UTF-8; mejor un '?'.
+for _flujo in (sys.stdout, sys.stderr):
+    try:
+        _flujo.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 ICONOS = {
     comun.PENDIENTE: "⧗",
     comun.BUSCANDO: "⟳",
@@ -340,7 +347,7 @@ def _elegir_destino(args):
         return args.destino
     destinos = fiio.detectar_destinos()
     if not destinos:
-        print("✗ No encuentro ninguna tarjeta montada en /run/media, /media ni /mnt.")
+        print(f"✗ No encuentro ninguna tarjeta en {fiio.donde_se_buscan()}.")
         print("   Conecta el FiiO (o el lector de la microSD) y vuelve a intentar,")
         print("   o indica la ruta a mano con --destino /ruta/al/montaje")
         return None
@@ -426,13 +433,11 @@ def cmd_arrancar(args):
     if _nicotine_activo():
         print("Nicotine+ ya está corriendo.")
         return 0
-    ejecutable = shutil.which("nicotine-plus") or shutil.which("nicotine")
-    if not ejecutable:
-        print("No encuentro el ejecutable de Nicotine+.")
+    ok, detalle = comun.lanzar_nicotine(headless=args.headless)
+    if not ok:
+        print(f"No pude abrir Nicotine+: {detalle}")
         return 1
-    orden = [ejecutable] + (["--headless"] if args.headless else [])
-    print("Arrancando: " + " ".join(orden))
-    os.posix_spawn(ejecutable, orden, os.environ)
+    print("Arrancando: " + detalle)
     return 0
 
 
@@ -440,7 +445,6 @@ def cmd_arrancar(args):
 # ─── revisar ──────────────────────────────────────────────────────────────────
 
 # Viven en fh_comun porque la vista de salud de la interfaz usa lo mismo.
-DIR_SNAP = comun.DIR_SNAP
 ENLACE_PLUGIN = comun.ENLACE_PLUGIN
 CONFIG_NICOTINE = comun.CONFIG_NICOTINE
 _ultimo_arranque_plugin = comun.ultimo_arranque_plugin
@@ -456,19 +460,19 @@ def cmd_revisar(args):
     def linea(estado, texto, detalle=""):
         print(f"  {estado} {texto}" + (f"\n       {detalle}" if detalle else ""))
 
-    print("\n▸ Instalación")
+    print(f"\n▸ Instalación  (Nicotine+ {comun.SABOR_NICOTINE}, biblioteca {comun.RAIZ_BIBLIOTECA})")
 
     destino = os.path.realpath(ENLACE_PLUGIN) if os.path.exists(ENLACE_PLUGIN) else None
     if destino and os.path.isfile(os.path.join(destino, "__init__.py")):
-        linea(ok, "el plugin está enlazado en el snap", destino)
+        linea(ok, f"el plugin está instalado en {comun.SABOR_NICOTINE}", destino)
     else:
-        linea(mal, "el plugin NO está instalado", "ejecuta: bash instalar.sh")
+        linea(mal, "el plugin NO está instalado", f"ejecuta: {comun.orden_instalador()}")
         problemas.append("plugin sin instalar")
 
     try:
         texto = open(CONFIG_NICOTINE, encoding="utf-8").read()
         habilitado = "'flac_hunter'" in texto
-        descargas_ok = "downloaddir = /home/yahel/Música/.descargas" in texto
+        descargas_ok = f"downloaddir = {comun.DIR_DESCARGAS}" in texto
     except OSError:
         habilitado = descargas_ok = False
     linea(ok if habilitado else mal,
@@ -480,15 +484,16 @@ def cmd_revisar(args):
           "downloaddir apunta a .descargas" if descargas_ok
           else "downloaddir NO apunta a .descargas (las descargas manuales ensucian la biblioteca)")
 
-    alcanza = _snap_lee_plugin()
-    if alcanza is True:
-        linea(ok, "el snap confinado alcanza el código del plugin")
-    elif alcanza is False:
-        linea(mal, "el snap NO puede leer el plugin (AppArmor)",
-              "mueve el código a una ruta sin punto inicial dentro de $HOME")
-        problemas.append("snap no lee el plugin")
-    else:
-        linea(duda, "no pude comprobar el acceso del snap")
+    if comun.SABOR_NICOTINE == "snap":
+        alcanza = _snap_lee_plugin()
+        if alcanza is True:
+            linea(ok, "el snap confinado alcanza el código del plugin")
+        elif alcanza is False:
+            linea(mal, "el snap NO puede leer el plugin (AppArmor)",
+                  "mueve el código a una ruta sin punto inicial dentro de $HOME")
+            problemas.append("snap no lee el plugin")
+        else:
+            linea(duda, "no pude comprobar el acceso del snap")
 
     for d in (comun.DIR_PIPELINE, comun.DIR_DESCARGAS, comun.RAIZ_BIBLIOTECA):
         linea(ok if os.access(d, os.W_OK) else mal, f"{d} escribible")
@@ -500,12 +505,17 @@ def cmd_revisar(args):
         problemas.append("Nicotine+ cerrado")
     else:
         linea(ok, f"Nicotine+ corriendo (pid {pid})")
-        arranque_proceso = os.path.getmtime(f"/proc/{pid}")
+        arranque_proceso = comun.arranque_proceso(pid)
         arranque_plugin = _ultimo_arranque_plugin()
         if arranque_plugin is None:
             linea(mal, "el plugin nunca se ha cargado",
                   "no hay '[plugin] activado' en pipeline.log")
             problemas.append("plugin sin cargar")
+        elif arranque_proceso is None:
+            import datetime
+            cuando = datetime.datetime.fromtimestamp(arranque_plugin).strftime("%H:%M:%S")
+            linea(duda, f"el plugin se cargó por última vez a las {cuando}",
+                  "no pude saber cuándo arrancó Nicotine+ para comparar")
         elif arranque_plugin >= arranque_proceso - 5:
             import datetime
             cuando = datetime.datetime.fromtimestamp(arranque_plugin).strftime("%H:%M:%S")
@@ -538,7 +548,7 @@ def cmd_revisar(args):
         linea(duda, "ninguna tarjeta montada (normal si no la tienes conectada)")
     for d in destinos:
         linea(ok, f"{d['montaje']}  ({d['tipo']}, {comun.formato_bytes(d['libre'])} libres)")
-        if d["tipo"] not in ("vfat", "exfat", "msdos"):
+        if d["tipo"] not in fiio.SISTEMAS_FAT:
             linea(duda, f"  el sistema de archivos es {d['tipo']}: "
                         "no puedo verificar el orden físico de las entradas")
 
@@ -628,6 +638,13 @@ def cmd_tui(_args):
     raiz = os.path.dirname(os.path.realpath(__file__))
     if raiz not in sys.path:
         sys.path.insert(0, raiz)
+    try:
+        import curses  # noqa: F401
+    except ImportError:
+        print("La interfaz necesita el módulo curses, que en Windows no viene con Python.")
+        print(f"Instálalo con:  {sys.executable} -m pip install windows-curses")
+        print("Mientras tanto la CLI funciona igual: flacpipe --help")
+        return 1
     import flacpipe_tui
     return flacpipe_tui.ejecutar()
 
@@ -681,8 +698,8 @@ def main():
     sp = sub.add_parser("fiio", help="PARTE 2: copiar al FiiO en orden estricto")
     sp.add_argument("filtro", nargs="*", help='"Artista" o "Artista/Álbum"')
     sp.add_argument("--destino", "-d", help="Punto de montaje de la tarjeta")
-    sp.add_argument("--raiz", help="Biblioteca de origen (por defecto ~/Música; "
-                                   "usa ~/Música/Artistas para la biblioteca heredada)")
+    sp.add_argument("--raiz", help=f"Biblioteca de origen (por defecto {comun.RAIZ_BIBLIOTECA}; "
+                                   "su subcarpeta Artistas es la biblioteca heredada)")
     sp.add_argument("--subcarpeta", default=fiio.DESTINO_REL_POR_DEFECTO,
                     help=f"Subcarpeta dentro de la tarjeta (por defecto {fiio.DESTINO_REL_POR_DEFECTO})")
     sp.add_argument("--simular", "-n", action="store_true", help="Mostrar el plan sin copiar")

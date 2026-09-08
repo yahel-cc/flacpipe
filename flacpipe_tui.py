@@ -59,7 +59,7 @@ PATRON_ID = re.compile(r"(\d{8}-\d{6}-[a-z0-9-]+)")
 # (settings["ventana_busqueda"] de flac_hunter). Sólo se usa para pintar la cuenta.
 VENTANA_BUSQUEDA = 45
 # Donde Nicotine+ escribe cada archivo mientras lo baja (config: incompletedir).
-DIR_INCOMPLETOS = os.path.join(comun.DIR_SNAP, ".local/share/nicotine/incomplete")
+DIR_INCOMPLETOS = comun.DIR_INCOMPLETOS
 PATRON_INCOMPLETO = re.compile(r"^INCOMPLETE[0-9a-f]{32}(.+)$")
 
 GLIFO_ESTADO = {
@@ -877,6 +877,7 @@ REPRODUCTORES = (
     ("mpv", ["--no-video", "--really-quiet"]),
     ("gst-play-1.0", []),
     ("pw-play", []),
+    ("afplay", []),                     # viene con macOS
     ("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet"]),
     ("mplayer", ["-really-quiet"]),
 )
@@ -916,7 +917,7 @@ class Reproductor:
 
     def tocar(self, ruta, titulo=""):
         if not self.disponible:
-            return "no hay ningún reproductor instalado (mpv, gst-play-1.0, pw-play…)"
+            return "no hay ningún reproductor instalado (mpv, ffplay, gst-play-1.0…)"
         self.parar()
         try:
             self.proceso = subprocess.Popen(
@@ -1439,7 +1440,7 @@ class VistaCola(Vista):
                 continue                       # eso ya está en «fuentes»
             resto = (resto.replace("/" + pet["id"], "").replace(pet["id"], "")
                           .replace(comun.DIR_DESCARGAS, ".descargas")
-                          .replace(comun.RAIZ_BIBLIOTECA + "/", ""))
+                          .replace(comun.RAIZ_BIBLIOTECA + os.sep, ""))
             resto = re.sub(r"\s{2,}", " ", resto).strip(" :")
             color = VistaLog.ETIQUETAS.get(etiqueta.split()[0], NORMAL)
             hora = marca[11:19] if len(marca) > 18 else marca
@@ -1822,7 +1823,7 @@ class VistaFiio(Vista):
             escribir(win, y + 2, 2,
                      "Conecta el FiiO o el lector de la microSD; aparece sola.", TENUE)
             escribir(win, y + 3, 2,
-                     "Se buscan sistemas FAT/exFAT en /run/media, /media y /mnt.", TENUE)
+                     f"Se buscan sistemas FAT/exFAT en {fiio.donde_se_buscan()}.", TENUE)
             y += 5
         else:
             for i, d in enumerate(app.datos.destinos):
@@ -2141,13 +2142,14 @@ class VistaSalud(Vista):
             salida.append((marca, texto, detalle, accion))
             self.resultados = list(salida)
 
-        anotar("titulo", "Instalación")
+        anotar("titulo", f"Instalación  (Nicotine+ {comun.SABOR_NICOTINE})")
         destino = (os.path.realpath(comun.ENLACE_PLUGIN)
                    if os.path.exists(comun.ENLACE_PLUGIN) else None)
         if destino and os.path.isfile(os.path.join(destino, "__init__.py")):
-            anotar(OK, "el plugin está enlazado en el snap", destino)
+            anotar(OK, f"el plugin está instalado en {comun.SABOR_NICOTINE}", destino)
         else:
-            anotar(MAL, "el plugin NO está instalado", "ejecuta: bash instalar.sh")
+            anotar(MAL, "el plugin NO está instalado",
+                   f"ejecuta: {comun.orden_instalador()}")
 
         try:
             texto = open(comun.CONFIG_NICOTINE, encoding="utf-8").read()
@@ -2171,14 +2173,15 @@ class VistaSalud(Vista):
             anotar(MAL, "Nicotine+ NO está corriendo", "pulsa n para abrirlo", "n")
         else:
             anotar(OK, f"Nicotine+ corriendo (pid {pid})")
-            try:
-                arranque = os.path.getmtime(f"/proc/{pid}")
-            except OSError:
-                arranque = 0
+            arranque = comun.arranque_proceso(pid)
             marca = comun.ultimo_arranque_plugin()
             if marca is None:
                 anotar(MAL, "el plugin nunca se ha cargado",
                        "no hay '[plugin] activado' en pipeline.log")
+            elif arranque is None:
+                cuando = datetime.fromtimestamp(marca).strftime("%H:%M:%S")
+                anotar(AVISO, f"el plugin se cargó por última vez a las {cuando}",
+                       "no pude saber cuándo arrancó Nicotine+ para comparar")
             elif marca >= arranque - 5:
                 cuando = datetime.fromtimestamp(marca).strftime("%H:%M:%S")
                 anotar(OK, f"el plugin se cargó en esta sesión ({cuando})")
@@ -2186,14 +2189,15 @@ class VistaSalud(Vista):
                 anotar(MAL, "el plugin no se cargó en esta sesión de Nicotine+",
                        "mira el log de Nicotine+ por si dio error al cargar")
 
-        alcanza = comun.snap_lee_plugin()
-        if alcanza is True:
-            anotar(OK, "el snap confinado alcanza el código del plugin")
-        elif alcanza is False:
-            anotar(MAL, "el snap NO puede leer el plugin (AppArmor)",
-                   "mueve el código a una ruta sin punto inicial dentro de $HOME")
-        else:
-            anotar(AVISO, "no pude comprobar el acceso del snap")
+        if comun.SABOR_NICOTINE == "snap":
+            alcanza = comun.snap_lee_plugin()
+            if alcanza is True:
+                anotar(OK, "el snap confinado alcanza el código del plugin")
+            elif alcanza is False:
+                anotar(MAL, "el snap NO puede leer el plugin (AppArmor)",
+                       "mueve el código a una ruta sin punto inicial dentro de $HOME")
+            else:
+                anotar(AVISO, "no pude comprobar el acceso del snap")
 
         anotar("titulo", "Cola y descargas")
         activas = len(app.datos.activas())
@@ -2878,15 +2882,20 @@ class App:
         if self.datos.nicotine_vivo():
             self.avisar("Nicotine+ ya está corriendo")
             return
-        try:
-            subprocess.Popen(["nicotine"], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+        ok, detalle = comun.lanzar_nicotine()
+        if ok:
             self.avisar("abriendo Nicotine+…", VERDE)
-        except OSError as error:
-            self.avisar(f"no pude abrirlo: {error}", ROJO)
+        else:
+            self.avisar(f"no pude abrirlo: {detalle}", ROJO)
 
     def abrir_log(self):
+        if comun.ES_WINDOWS:
+            # No hay editor de terminal que dar por hecho: que lo abra Windows.
+            try:
+                os.startfile(comun.ARCHIVO_LOG)
+            except OSError as error:
+                self.avisar(f"no pude abrir el log: {error}", ROJO)
+            return
         editor = os.environ.get("EDITOR") or "nano"
         try:
             curses.def_prog_mode()

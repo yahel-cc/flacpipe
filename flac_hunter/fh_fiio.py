@@ -23,6 +23,12 @@ import fh_comun as comun
 
 TAMAÑO_BLOQUE = 4 * 1024 * 1024
 SISTEMAS_EXTRAIBLES = {"vfat", "exfat", "fuseblk", "ntfs", "ntfs3", "msdos"}
+# Sistemas en los que listdir devuelve el orden físico de la tabla de directorios.
+SISTEMAS_FAT = {"vfat", "exfat", "msdos"}
+# Cómo llama cada sistema operativo a lo mismo.
+NOMBRES_TIPO = {"fat": "vfat", "fat12": "vfat", "fat16": "vfat", "fat32": "vfat"}
+# Linux: dónde montan las tarjetas udisks y compañía. macOS usa /Volumes y
+# Windows letras de unidad; eso lo resuelve _montajes().
 BASES_MONTAJE = ("/run/media/", "/media/", "/mnt/")
 
 # Subcarpeta dentro de la tarjeta donde vive la música.
@@ -43,28 +49,83 @@ def _desescapar(ruta):
     return re.sub(r"\\(\d{3})", lambda m: chr(int(m.group(1), 8)), ruta)
 
 
+def _montajes():
+    """Todo lo montado: [(dispositivo, montaje, tipo, etiqueta, parece_tarjeta)].
+
+    `parece_tarjeta` es lo que en cada sistema distingue un medio extraíble:
+    en Linux, colgar de /run/media, /media o /mnt; en macOS, estar en /Volumes;
+    en Windows, ser una unidad extraíble (o fija pero FAT/exFAT, que es como
+    aparecen algunos lectores de tarjetas) y no la del sistema.
+    """
+    salida = []
+    if comun.ES_WINDOWS:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
+        k32.GetDriveTypeW.restype = ctypes.c_uint
+        # Sin esto, un lector de tarjetas vacío abre un diálogo "no hay disco".
+        previo = k32.SetErrorMode(1)
+        try:
+            mascara = k32.GetLogicalDrives()
+            sistema = os.environ.get("SystemDrive", "C:").upper()
+            for i in range(26):
+                if not mascara & (1 << i):
+                    continue
+                raiz = f"{chr(65 + i)}:\\"
+                clase = k32.GetDriveTypeW(raiz)   # 2 extraíble, 3 fijo, 4 red, 5 óptico
+                if clase not in (2, 3):
+                    continue
+                etiqueta = ctypes.create_unicode_buffer(261)
+                nombre_fs = ctypes.create_unicode_buffer(261)
+                if not k32.GetVolumeInformationW(raiz, etiqueta, 261, None, None, None,
+                                                 nombre_fs, 261):
+                    continue
+                tipo = NOMBRES_TIPO.get(nombre_fs.value.lower(), nombre_fs.value.lower())
+                parece = raiz[:2].upper() != sistema and (clase == 2 or tipo in SISTEMAS_FAT)
+                salida.append((raiz, raiz, tipo, etiqueta.value or raiz[:2], parece))
+        finally:
+            k32.SetErrorMode(previo)
+        return salida
+
+    if comun.ES_MAC:
+        try:
+            texto = subprocess.run(["mount"], capture_output=True, text=True,
+                                   timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return salida
+        for linea in texto.splitlines():
+            m = re.match(r"^(\S+) on (.+) \((\w+)", linea)
+            if not m:
+                continue
+            montaje = m.group(2)
+            tipo = NOMBRES_TIPO.get(m.group(3).lower(), m.group(3).lower())
+            salida.append((m.group(1), montaje, tipo, os.path.basename(montaje),
+                           montaje.startswith("/Volumes/")))
+        return salida
+
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for linea in f:
+                partes = linea.split()
+                if len(partes) < 3:
+                    continue
+                montaje = _desescapar(partes[1])
+                salida.append((partes[0], montaje, partes[2], os.path.basename(montaje),
+                               montaje.startswith(BASES_MONTAJE)))
+    except OSError:
+        pass
+    return salida
+
+
 def detectar_destinos():
     """Puntos de montaje que parecen una tarjeta/DAP conectado."""
     encontrados = []
-    try:
-        with open("/proc/mounts", "r", encoding="utf-8") as f:
-            lineas = f.readlines()
-    except OSError:
-        return encontrados
-
-    for linea in lineas:
-        partes = linea.split()
-        if len(partes) < 3:
-            continue
-        dispositivo, montaje, tipo = partes[0], _desescapar(partes[1]), partes[2]
-        if tipo not in SISTEMAS_EXTRAIBLES:
-            continue
-        if not montaje.startswith(BASES_MONTAJE):
+    for dispositivo, montaje, tipo, etiqueta, parece in _montajes():
+        if tipo not in SISTEMAS_EXTRAIBLES or not parece:
             continue
         try:
-            st = os.statvfs(montaje)
-            libre = st.f_bavail * st.f_frsize
-            total = st.f_blocks * st.f_frsize
+            uso = shutil.disk_usage(montaje)
+            libre, total = uso.free, uso.total
         except OSError:
             libre = total = 0
         encontrados.append({
@@ -73,9 +134,18 @@ def detectar_destinos():
             "tipo": tipo,
             "libre": libre,
             "total": total,
-            "etiqueta": os.path.basename(montaje),
+            "etiqueta": etiqueta,
         })
     return encontrados
+
+
+def donde_se_buscan():
+    """Texto para los mensajes: dónde se esperan las tarjetas en este sistema."""
+    if comun.ES_WINDOWS:
+        return "unidades extraíbles (letras de unidad)"
+    if comun.ES_MAC:
+        return "/Volumes"
+    return "/run/media, /media y /mnt"
 
 
 # ─── Inventario de la biblioteca ──────────────────────────────────────────────
@@ -193,25 +263,27 @@ def _orden_fisico(directorio):
 def _tipo_sistema(ruta):
     """Sistema de archivos del punto de montaje que contiene `ruta`."""
     ruta = os.path.abspath(ruta)
+    if comun.ES_WINDOWS:
+        ruta = ruta.lower()
     mejor = ("", "")
-    try:
-        with open("/proc/mounts", "r", encoding="utf-8") as f:
-            for linea in f:
-                partes = linea.split()
-                if len(partes) < 3:
-                    continue
-                montaje = _desescapar(partes[1])
-                if (ruta == montaje or ruta.startswith(montaje.rstrip("/") + "/")) \
-                        and len(montaje) > len(mejor[0]):
-                    mejor = (montaje, partes[2])
-    except OSError:
-        pass
+    for _dispositivo, montaje, tipo, _etiqueta, _parece in _montajes():
+        base = montaje.lower() if comun.ES_WINDOWS else montaje
+        if (ruta == base or ruta.startswith(base.rstrip(os.sep) + os.sep)) \
+                and len(base) > len(mejor[0]):
+            mejor = (base, tipo)
     return mejor[1]
+
+
+def _sync():
+    """Vaciar cachés a disco. Windows no tiene sync global: ahí basta con el
+    fsync por archivo que ya se hace."""
+    if hasattr(os, "sync"):
+        os.sync()
 
 
 def _orden_es_observable(ruta):
     """En ext4/btrfs el orden de listdir no dice nada; en FAT/exFAT sí."""
-    return _tipo_sistema(ruta) in {"vfat", "exfat", "msdos"}
+    return _tipo_sistema(ruta) in SISTEMAS_FAT
 
 
 def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
@@ -318,7 +390,7 @@ def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
                 # Queda medio álbum en la tarjeta: sólo --rehacer lo arregla.
                 resumen["desordenados"].append(item["rel"])
                 _sincronizar_directorio(dir_destino)
-                os.sync()
+                _sync()
                 break
 
             # La portada va al final para no ocupar una entrada antes de las pistas
@@ -327,7 +399,7 @@ def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
                                 os.path.join(dir_destino, item["portada"]))
 
             _sincronizar_directorio(dir_destino)
-            os.sync()
+            _sync()
 
             if _orden_es_observable(dir_destino):
                 fisico = _orden_fisico(dir_destino)
@@ -346,23 +418,34 @@ def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
             resumen["errores"].append(f"{item['rel']}: {error}")
 
     if not simular:
-        os.sync()
+        _sync()
 
     return resumen
 
 
 def desmontar(montaje, informar=print):
-    """sync + udisksctl unmount del punto de montaje."""
-    os.sync()
+    """sync + desmontar/expulsar el punto de montaje, con lo que tenga cada sistema."""
+    _sync()
     try:
-        salida = subprocess.run(
-            ["udisksctl", "unmount", "-p",
-             f"block_devices/{os.path.basename(_dispositivo_de(montaje) or '')}"],
-            capture_output=True, text=True, timeout=60)
-        if salida.returncode != 0:
-            salida = subprocess.run(["udisksctl", "unmount", "-b", _dispositivo_de(montaje)],
+        if comun.ES_WINDOWS:
+            letra = os.path.splitdrive(montaje)[0]
+            orden = ["powershell", "-NoProfile", "-Command",
+                     "(New-Object -ComObject Shell.Application).NameSpace(17)"
+                     f".ParseName('{letra}').InvokeVerb('Eject')"]
+            salida = subprocess.run(orden, capture_output=True, text=True, timeout=60,
+                                    creationflags=0x08000000)
+        elif comun.ES_MAC:
+            salida = subprocess.run(["diskutil", "unmount", montaje],
                                     capture_output=True, text=True, timeout=60)
-        informar((salida.stdout or salida.stderr).strip())
+        else:
+            salida = subprocess.run(
+                ["udisksctl", "unmount", "-p",
+                 f"block_devices/{os.path.basename(_dispositivo_de(montaje) or '')}"],
+                capture_output=True, text=True, timeout=60)
+            if salida.returncode != 0:
+                salida = subprocess.run(["udisksctl", "unmount", "-b", _dispositivo_de(montaje)],
+                                        capture_output=True, text=True, timeout=60)
+        informar((salida.stdout or salida.stderr).strip() or "hecho")
         return salida.returncode == 0
     except (OSError, subprocess.SubprocessError) as error:
         informar(f"No se pudo desmontar automáticamente: {error}")
