@@ -163,6 +163,14 @@ nueva y la heredada, y **la esquina derecha de las pestañas dice siempre en cu�
 estás** — si un álbum recién bajado «no aparece», casi siempre es que estabas
 mirando la heredada.
 
+`h` **mueve** a la heredada (`~/Música/Artistas`, la carpeta que comparte
+Nicotine+) lo marcado; si no hay nada marcado, el artista entero cuando el cursor
+está en la columna de artistas, o el álbum seleccionado en las otras. Pide
+confirmación, no pisa un álbum que ya esté en la heredada y borra la carpeta del
+artista en la nueva si queda vacía. Lo movido deja de salir en la biblioteca
+nueva y en la copia al FiiO; para copiarlo a la tarjeta, cambia con `b` a la
+heredada antes de ir a la vista FiiO.
+
 La CLI sigue entera y es la que hay que usar en scripts o con tuberías: la
 interfaz no la sustituye, sólo evita tener que recordarla.
 

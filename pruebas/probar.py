@@ -8,6 +8,7 @@ conductor.py (texto más un mapa de colores por celda).
     python3 pruebas/probar.py falso      # descarga simulada, búsqueda, espera, aviso
     python3 pruebas/probar.py fiio       # copia a una tarjeta de mentira
     python3 pruebas/probar.py importar   # importar playlists en csv desde la interfaz
+    python3 pruebas/probar.py heredar    # pasar a la heredada en una biblioteca de mentira
 
 Las capturas quedan en pruebas/salida/capturas/<sesion>-<momento>.txt. Nada
 de esto escribe en ~/Música: lo real se lee y lo simulado vive en
@@ -363,6 +364,44 @@ def fiio_prueba(cols, filas, etiqueta):
     s.cerrar()
 
 
+def heredar(cols, filas, etiqueta):
+    """Biblioteca de mentira en pruebas/salida: h sobre un artista y sobre un álbum."""
+    raiz = os.path.join(SALIDA, "biblioteca-heredar")
+    shutil.rmtree(raiz, ignore_errors=True)
+    for rel in ("Art A/Disco 1/01 Uno.flac", "Art A/Disco 2/01 Dos.flac",
+                "Art B/Solo/01 Tres.flac", "Art B/Otro/01 Cuatro.flac"):
+        ruta = os.path.join(raiz, rel)
+        os.makedirs(os.path.dirname(ruta), exist_ok=True)
+        with open(ruta, "wb") as f:
+            f.write(b"fLaC" + b"\0" * 4000)
+    os.makedirs(os.path.join(raiz, "Artistas", "Viejo", "Disco"), exist_ok=True)
+    anterior = os.environ.get("FLACPIPE_BIBLIOTECA")
+    os.environ["FLACPIPE_BIBLIOTECA"] = raiz
+    try:
+        s = Sesion(f"heredar-{etiqueta}", cols, filas)
+    finally:
+        if anterior is None:
+            os.environ.pop("FLACPIPE_BIBLIOTECA")
+        else:
+            os.environ["FLACPIPE_BIBLIOTECA"] = anterior
+    s.teclas("2")
+    s.capturar("biblioteca", espera=1.0)
+    s.teclas("h")                      # cursor en artistas: Art A entero
+    s.capturar("confirmar-artista", espera=0.4)
+    s.teclas("s")
+    s.capturar("movido-artista", espera=1.5)
+    s.teclas(DER, "h")                 # Art B, sólo el álbum del cursor
+    s.capturar("confirmar-album", espera=0.4)
+    s.teclas("s")
+    s.capturar("movido-album", espera=1.5)
+    s.teclas("b")
+    s.capturar("heredada", espera=1.0)
+    s.cerrar()
+    for dp, _ds, fs in sorted(os.walk(raiz)):
+        for f in fs:
+            print("   ", os.path.relpath(os.path.join(dp, f), raiz))
+
+
 if __name__ == "__main__":
     que = sys.argv[1] if len(sys.argv) > 1 else "todo"
     if que in ("real", "todo"):
@@ -378,4 +417,6 @@ if __name__ == "__main__":
     if que in ("importar", "todo"):
         importar(120, 40, "media")
         importar(78, 20, "chica")
+    if que in ("heredar", "todo"):
+        heredar(120, 30, "media")
     print("capturas en", CAPTURAS)
