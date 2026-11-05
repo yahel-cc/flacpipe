@@ -404,3 +404,45 @@ def organizar(origen, artista_sug=None, album_sug=None, raiz=None,
         "nombres": movidos,
         "avisos": avisos,
     }
+
+
+# ─── Pasar a la heredada ──────────────────────────────────────────────────────
+
+def mover_a_heredada(albumes, raiz=None, informar=print):
+    """Mueve álbumes de la biblioteca nueva a raiz/Artistas/Artista/Álbum.
+
+    La heredada es la carpeta que Nicotine+ comparte. `albumes` son
+    diccionarios con "artista", "album" y "dir" (los de listar_biblioteca).
+    Si el álbum ya existe en la heredada no se toca nada: se avisa y se
+    sigue. La carpeta del artista en la nueva se borra si queda vacía.
+    """
+    raiz = raiz or comun.RAIZ_BIBLIOTECA
+    heredada = os.path.join(raiz, "Artistas")
+    resumen = {"copiados": 0, "archivos": 0, "bytes": 0, "errores": [], "omitidos": 0}
+    for item in albumes:
+        rel = f"{item['artista']}/{item['album']}"
+        destino = os.path.join(heredada, item["artista"], item["album"])
+        if os.path.exists(destino):
+            informar(f"  ! {rel} — ya está en la heredada; se deja como está")
+            resumen["omitidos"] += 1
+            continue
+        try:
+            archivos = [os.path.join(dp, f) for dp, _, fs in os.walk(item["dir"]) for f in fs]
+            peso = sum(os.path.getsize(a) for a in archivos)
+            os.makedirs(os.path.dirname(destino), exist_ok=True)
+            _mover(item["dir"], destino)
+        except OSError as error:
+            informar(f"  ✗ {rel} — {error}")
+            resumen["errores"].append(f"{rel}: {error}")
+            continue
+        informar(f"  ✓ {rel} → Artistas/{rel}")
+        resumen["copiados"] += 1
+        resumen["archivos"] += len(archivos)
+        resumen["bytes"] += peso
+        dir_artista = os.path.dirname(item["dir"])
+        try:
+            if not os.listdir(dir_artista):
+                os.rmdir(dir_artista)
+        except OSError:
+            pass
+    return resumen

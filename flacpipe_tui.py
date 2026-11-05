@@ -1594,6 +1594,8 @@ class VistaBiblioteca(Vista):
             pares.append(("s", "parar"))
         pares += [("/", "buscar"), ("r", "recargar"),
                   ("b", "nueva" if app.biblioteca.heredada else "heredada")]
+        if not app.biblioteca.heredada:
+            pares.append(("h", "pasar a heredada"))
         return pares
 
     def dibujar(self, app, y0, alto, ancho):
@@ -1746,9 +1748,43 @@ class VistaBiblioteca(Vista):
             self._artista_previo = self._album_previo = ""
         elif k == "o":
             app.organizar()
+        elif k == "h":
+            self._pedir_heredar(app)
         else:
             return False
         return True
+
+    def a_heredar(self, app):
+        """Lo que movería h: los marcados, o el artista entero si el cursor está
+        en la columna de artistas, o el álbum donde está el cursor."""
+        if app.marcados:
+            return [item for a in app.biblioteca.artistas for item in a["albumes"]
+                    if item["rel"] in app.marcados]
+        if self.columna == 0:
+            artista = self.artista(app)
+            return list(artista["albumes"]) if artista else []
+        item = self.album(app)
+        return [item] if item else []
+
+    def _pedir_heredar(self, app):
+        if app.biblioteca.heredada:
+            app.avisar("ya estás en la heredada; pulsa b para volver a la nueva", AMARILLO)
+            return
+        albumes = self.a_heredar(app)
+        if not albumes:
+            app.avisar("no hay nada que pasar a la heredada", AMARILLO)
+            return
+        peso = comun.formato_bytes(sum(a["bytes"] for a in albumes))
+        if len(albumes) == 1:
+            que = albumes[0]["rel"]
+        elif len({a["artista"] for a in albumes}) == 1:
+            que = f"{albumes[0]['artista']} ({len(albumes)} álbumes)"
+        else:
+            que = f"{len(albumes)} álbumes"
+        app.abrir(OverlayConfirmar(
+            f"¿Mover {que}, {peso}, a la heredada (Artistas) para compartirlo en "
+            f"Nicotine+? Deja de salir en la biblioteca nueva.",
+            lambda: app.pasar_a_heredada(albumes)))
 
     def _reiniciar_hijas(self, col):
         for hija in range(col + 1, 3):
@@ -2813,6 +2849,29 @@ class App:
         self.trabajo.lanzar("organizando .descargas", tarea, clase="organizar")
         self.ir_a(0)
 
+    def pasar_a_heredada(self, albumes):
+        if self.trabajo.activo:
+            self.avisar("ya hay una tarea en curso", AMARILLO)
+            return
+
+        def tarea(trabajo):
+            trabajo.registrar(f"▸ {len(albumes)} álbum(es) a la heredada")
+            resumen = biblioteca.mover_a_heredada(albumes, informar=trabajo.registrar)
+            for item in albumes:
+                self.marcados.discard(item["rel"])
+            self.biblioteca.cargar()
+            if resumen["errores"]:
+                self.avisar(f"{len(resumen['errores'])} error(es) al mover; "
+                            f"mira la Cola", ROJO, 6)
+            elif resumen["omitidos"]:
+                self.avisar(f"{resumen['copiados']} movido(s), {resumen['omitidos']} "
+                            f"ya estaban en la heredada", AMARILLO, 6)
+            else:
+                self.avisar(f"{resumen['copiados']} álbum(es) en la heredada", VERDE)
+            return resumen
+
+        self.trabajo.lanzar("pasando a la heredada", tarea, clase="organizar")
+
     @staticmethod
     def _agrupar_sueltos(trabajo, sueltos):
         """Agrupa FLAC sueltos por ALBUMARTIST+ALBUM en carpetas temporales."""
@@ -2935,6 +2994,8 @@ class App:
              lambda: (self.biblioteca.cargar(), self.ir_a(1))),
             ("cambiar entre la biblioteca nueva y la heredada", "b",
              lambda: (self.biblioteca.cambiar_raiz(), self.ir_a(1))),
+            ("pasar a la heredada (compartir en Nicotine+)", "h",
+             lambda: (self.ir_a(1), self.vistas[1]._pedir_heredar(self))),
             ("parar la reproducción", "s", self.reproductor.parar),
             ("abrir Nicotine+", "", self.arrancar_nicotine),
             ("revisar la instalación", "R",
