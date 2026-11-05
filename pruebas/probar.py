@@ -9,6 +9,10 @@ conductor.py (texto más un mapa de colores por celda).
     python3 pruebas/probar.py fiio       # copia a una tarjeta de mentira
     python3 pruebas/probar.py importar   # importar playlists en csv desde la interfaz
     python3 pruebas/probar.py heredar    # pasar a la heredada en una biblioteca de mentira
+    python3 pruebas/probar.py animar     # graba cada cuadro: descarga, ola, pestañas, ventana
+
+Con `animar`, los cuadros quedan en pruebas/salida/sesiones/animar/cuadros/ y
+pruebas/render.py los convierte en hojas o en un GIF.
 
 Las capturas quedan en pruebas/salida/capturas/<sesion>-<momento>.txt. Nada
 de esto escribe en ~/Música: lo real se lee y lo simulado vive en
@@ -40,19 +44,22 @@ CAPTURAS = os.path.join(SALIDA, "capturas")
 os.makedirs(CAPTURAS, exist_ok=True)
 
 ARRIBA, ABAJO, DER, IZQ = "\x1bOA", "\x1bOB", "\x1bOC", "\x1bOD"
+FALLOS = []      # sesiones en las que la interfaz murió con una excepción
 
 
 class Sesion:
-    def __init__(self, nombre, cols, filas, escenario=None):
+    def __init__(self, nombre, cols, filas, escenario=None, grabar=False,
+                 term="xterm-256color", programa=None):
         self.nombre = nombre
         self.salida = os.path.join(SALIDA, "sesiones", nombre)
         shutil.rmtree(self.salida, ignore_errors=True)
         os.makedirs(self.salida)
-        env = dict(os.environ, TERM="xterm-256color", SALIDA=self.salida,
-                   ESCENARIO=json.dumps(escenario or {}))
+        env = dict(os.environ, TERM=term, SALIDA=self.salida,
+                   ESCENARIO=json.dumps(escenario or {}), GRABAR="1" if grabar else "0")
+        self.cuadros = os.path.join(self.salida, "cuadros")
         pid, fd = pty.fork()
         if pid == 0:
-            os.execvpe(sys.executable, [sys.executable, CONDUCTOR], env)
+            os.execvpe(sys.executable, [sys.executable, programa or CONDUCTOR], env)
         self.pid, self.fd = pid, fd
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", filas, cols, 0, 0))
         self._vivo = True
@@ -89,9 +96,18 @@ class Sesion:
                 break
             time.sleep(0.2)
         shutil.copy(origen, destino)
+        origen_json = os.path.join(self.salida, "pantalla.json")
+        if os.path.exists(origen_json):
+            shutil.copy(origen_json, destino[:-4] + ".json")
         return destino
 
     def cerrar(self):
+        if b"Traceback" in self._basura:
+            # la interfaz murió dentro del pty: que no pase como una captura más
+            texto = self._basura.decode("utf-8", "replace")
+            FALLOS.append(self.nombre)
+            print(f"\n!! {self.nombre}: la interfaz lanzó una excepción\n"
+                  + texto[texto.rfind("Traceback"):][-1500:])
         try:
             os.write(self.fd, b"q")
             time.sleep(0.4)
@@ -351,8 +367,47 @@ def importar(cols, filas, etiqueta):
     s.cerrar()
 
 
+def biblioteca_de_mentira(raiz, albumes, tam=40_000_000):
+    """Crea raiz/Artista/Álbum/NN Título.flac. Son archivos dispersos: dicen
+    pesar `tam` bytes (lo que suma el plan de copia) pero no ocupan disco."""
+    shutil.rmtree(raiz, ignore_errors=True)
+    for artista, album, titulos in albumes:
+        carpeta = os.path.join(raiz, artista, album)
+        os.makedirs(carpeta, exist_ok=True)
+        for i, titulo in enumerate(titulos, 1):
+            with open(os.path.join(carpeta, f"{i:02d} {titulo}.flac"), "wb") as f:
+                f.write(b"fLaC")
+                f.truncate(tam + i * 1_300_000)
+    return raiz
+
+
+def con_biblioteca(raiz, crear_sesion):
+    """Lanza la sesión con FLACPIPE_BIBLIOTECA apuntando a `raiz`."""
+    anterior = os.environ.get("FLACPIPE_BIBLIOTECA")
+    os.environ["FLACPIPE_BIBLIOTECA"] = raiz
+    try:
+        return crear_sesion()
+    finally:
+        if anterior is None:
+            os.environ.pop("FLACPIPE_BIBLIOTECA")
+        else:
+            os.environ["FLACPIPE_BIBLIOTECA"] = anterior
+
+
+ALBUMES_DE_MUESTRA = [
+    ("CASIOPEA", "Mint Jams", ["Take Me", "Asayake", "Midnight Rendezvous", "Time Limit",
+                               "Domino Line", "Tears of the Star", "Swear"]),
+    ("Nujabes", "Modal Soul", ["Feather", "Ordinary Joe", "Reflection Eternal",
+                               "Luv(sic) pt3", "Music Is Mine", "Eclipse", "The Sign"]),
+    ("Tom Misch", "Geography", ["Before Paris", "Lost in Paris", "South of the River",
+                                "Movie", "Tick Tock", "It Runs Through Me"]),
+]
+
+
 def fiio_prueba(cols, filas, etiqueta):
-    s = Sesion(f"fiio-{etiqueta}", cols, filas, {"fiio_falso": True})
+    raiz = biblioteca_de_mentira(os.path.join(SALIDA, "biblioteca-fiio"), ALBUMES_DE_MUESTRA)
+    s = con_biblioteca(raiz, lambda: Sesion(f"fiio-{etiqueta}", cols, filas,
+                                            {"fiio_falso": True}))
     s.teclas("3")
     s.capturar("plan", espera=1.5)
     s.teclas("\r")
@@ -402,6 +457,66 @@ def heredar(cols, filas, etiqueta):
             print("   ", os.path.relpath(os.path.join(dp, f), raiz))
 
 
+def terminar_descarga(esc):
+    """La descarga simulada acaba: la petición pasa a lista con su resultado."""
+    cola = json.load(open(esc["_cola"]))
+    for p in cola["peticiones"]:
+        if p["id"] == esc["_id_baja"]:
+            p["estado"] = "listo"
+            p["actualizado"] = iso(0)
+            p["progreso"] = {"terminados": 15, "total": 15}
+            p["resultado"] = {"carpeta": "Nujabes/Modal Soul", "artista": "Nujabes",
+                              "album": "Modal Soul", "pistas": 15,
+                              "calidad": "16-bit / 44.1 kHz", "parcial": False, "faltantes": []}
+    json.dump(cola, open(esc["_cola"], "w"), ensure_ascii=False)
+    with open(esc["comun"]["ARCHIVO_LOG"], "a") as f:
+        f.write(f"{iso(0)}  [listo] {esc['_id_baja']} → Nujabes/Modal Soul "
+                f"(15 pistas, 16-bit / 44.1 kHz)\n")
+
+
+def animar(cols=120, filas=36):
+    """Graba cada cuadro de un recorrido con todo lo que se mueve. Las marcas
+    de tiempo quedan en marcas.json para elegir cuadros con render.py --entre."""
+    raiz = os.path.join(SALIDA, "falso")
+    esc = escenario_falso(raiz, "descargando")
+    parar = threading.Event()
+    threading.Thread(target=crecer, args=(esc["_actual"], parar), daemon=True).start()
+    s = Sesion("animar", cols, filas, esc, grabar=True)
+    marcas = {}
+    t0 = time.monotonic()
+
+    def marca(nombre):
+        marcas[nombre] = round(time.monotonic() - t0, 2)
+
+    time.sleep(3.0)
+    marca("terminar")
+    parar.set()
+    terminar_descarga(esc)
+    s.teclas("\x1bOH")
+    time.sleep(3.0)
+    marca("pestana-2")
+    s.teclas("2", pausa=0)
+    time.sleep(0.8)
+    marca("pestana-5")
+    s.teclas("5", pausa=0)
+    time.sleep(1.2)
+    marca("pestana-1")
+    s.teclas("1", pausa=0)
+    time.sleep(0.8)
+    marca("ventana")
+    s.teclas("a", pausa=0)
+    time.sleep(0.9)
+    s.teclas("Nujabes", pausa=0.05)
+    time.sleep(0.6)
+    s.teclas("\x1b", pausa=0.3)
+    marca("fin")
+    s.cerrar()
+    with open(os.path.join(s.salida, "marcas.json"), "w") as f:
+        json.dump(marcas, f, indent=1)
+    print("marcas:", marcas)
+    print("cuadros en", s.cuadros)
+
+
 if __name__ == "__main__":
     que = sys.argv[1] if len(sys.argv) > 1 else "todo"
     if que in ("real", "todo"):
@@ -419,4 +534,9 @@ if __name__ == "__main__":
         importar(78, 20, "chica")
     if que in ("heredar", "todo"):
         heredar(120, 30, "media")
+    if que == "animar":
+        animar()
     print("capturas en", CAPTURAS)
+    if FALLOS:
+        print("FALLARON:", ", ".join(FALLOS))
+        sys.exit(1)
