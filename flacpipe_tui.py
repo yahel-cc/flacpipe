@@ -49,8 +49,14 @@ import fh_listas as listas           # noqa: E402
 OCTAVOS = ("", "▏", "▎", "▍", "▌", "▋", "▊", "▉")
 BLOQUE = "█"
 VACIO = "─"
-BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ALTURAS = "▁▂▃▄▅▆▇█"
+
+# Dos burbujas que suben con vaivén, en una sola celda de braille: algo trabaja.
+BURBUJAS = "⡁⠠⠂⢈⠄⠐"
+# Gotas que caen por las dos columnas de la celda: algo se está bajando.
+GOTAS = "⠡⢂⠌⡐"
+# Un sonar: un punto que se abre en onda y se apaga. Algo se está buscando.
+SONAR = ("•", "∘", "○", "○", " ")
 
 PATRON_LOG = re.compile(r"^(\S+)\s+\[([^\]]+)\]\s*(.*)$")
 PATRON_ID = re.compile(r"(\d{8}-\d{6}-[a-z0-9-]+)")
@@ -63,8 +69,8 @@ DIR_INCOMPLETOS = comun.DIR_INCOMPLETOS
 PATRON_INCOMPLETO = re.compile(r"^INCOMPLETE[0-9a-f]{32}(.+)$")
 
 GLIFO_ESTADO = {
-    comun.PENDIENTE: "⧗",
-    comun.BUSCANDO: "⟳",
+    comun.PENDIENTE: "•",
+    comun.BUSCANDO: "○",
     comun.DESCARGANDO: "↓",
     comun.LISTO: "✓",
     comun.FALLIDO: "✗",
@@ -75,113 +81,414 @@ OK, MAL, AVISO = "✓", "✗", "!"
 
 
 # ─── Colores ──────────────────────────────────────────────────────────────────
+# Tema acuático: azules de lo hondo a la espuma para casi todo, y tres tonos
+# para lo que tiene que saltar a la vista: espuma (bien), coral (mal) y arena
+# (ojo). Se pinta con la paleta de 256 colores de xterm; con 8 o 16 colores se
+# toma lo más parecido de los básicos, y sin color, negrita e inverso.
 
-(NORMAL, AMBAR, VERDE, ROJO, AZUL, AMARILLO, VIOLETA, TENUE, BLANCO,
- SEL, INV, MARCA, MARCA_AMBAR, MARCA_ROJO, MARCA_AZUL) = range(15)
+(NORMAL, AGUA, ESPUMA, CORAL, CIELO, ARENA, LILA, TENUE, BLANCO, LINEA,
+ SEL, INV, VENTANA) = range(13)
 
-# Con qué fondo se pinta un aviso según el color en que se pidió
-FONDO_DE = {VERDE: MARCA, AMBAR: MARCA_AMBAR, AMARILLO: MARCA_AMBAR,
-            ROJO: MARCA_ROJO, AZUL: MARCA_AZUL}
+# Estilo de la celda, aparte del color
+NEGRITA, ATENUADO, INVERSO = 1, 2, 4
+# Fondo «al revés» para las terminales sin color: así se marca la selección
+REVES = -2
 
-_ATRIB = {}
+# Degradados de 256 colores, del fondo a la superficie
+OCEANO = (24, 25, 31, 32, 38, 39, 45, 81, 117, 159, 195)
+CIELOS = (24, 25, 26, 32, 33, 39, 75, 111, 153, 189)
+TURQUESA = (23, 30, 37, 44, 80, 116, 152, 195)
+ARRECIFE = (23, 29, 36, 43, 79, 115, 158, 195)
+CORALES = (52, 88, 131, 167, 174, 210, 217, 224)
+DUNAS = (58, 94, 136, 179, 180, 222, 223, 230)
+LAVANDA = (60, 61, 104, 105, 147, 189)
+
+FONDO_SELECCION = 236
+FONDO_VENTANA = 235
+COLOR_LINEA = 23
+
+TEMA_256 = {
+    NORMAL: (-1, None, 0),
+    AGUA: (81, None, 0),
+    ESPUMA: (79, None, 0),
+    CORAL: (210, None, 0),
+    CIELO: (75, None, 0),
+    ARENA: (222, None, 0),
+    LILA: (147, None, 0),
+    TENUE: (66, None, 0),
+    BLANCO: (195, None, NEGRITA),
+    LINEA: (COLOR_LINEA, None, 0),
+    SEL: (195, FONDO_SELECCION, 0),
+    INV: (16, 81, NEGRITA),
+    VENTANA: (-1, FONDO_VENTANA, 0),
+}
+
+TEMA_BASICO = {
+    NORMAL: (-1, None, 0),
+    AGUA: (curses.COLOR_CYAN, None, NEGRITA),
+    ESPUMA: (curses.COLOR_GREEN, None, 0),
+    CORAL: (curses.COLOR_RED, None, 0),
+    CIELO: (curses.COLOR_BLUE, None, NEGRITA),
+    ARENA: (curses.COLOR_YELLOW, None, 0),
+    LILA: (curses.COLOR_MAGENTA, None, 0),
+    TENUE: (-1, None, ATENUADO),
+    BLANCO: (curses.COLOR_WHITE, None, NEGRITA),
+    LINEA: (curses.COLOR_BLUE, None, 0),
+    SEL: (curses.COLOR_WHITE, curses.COLOR_BLUE, 0),
+    INV: (curses.COLOR_BLACK, curses.COLOR_CYAN, NEGRITA),
+    VENTANA: (-1, -1, 0),
+}
+
+TEMA_SIN_COLOR = {
+    NORMAL: (-1, None, 0),
+    AGUA: (-1, None, NEGRITA),
+    ESPUMA: (-1, None, 0),
+    CORAL: (-1, None, NEGRITA),
+    CIELO: (-1, None, 0),
+    ARENA: (-1, None, NEGRITA),
+    LILA: (-1, None, 0),
+    TENUE: (-1, None, ATENUADO),
+    BLANCO: (-1, None, NEGRITA),
+    LINEA: (-1, None, ATENUADO),
+    SEL: (-1, REVES, 0),
+    INV: (-1, REVES, NEGRITA),
+    VENTANA: (-1, -1, 0),
+}
+
+# El degradado que corresponde a cada tono, para barras, olas y brillos
+RAMPA = {AGUA: OCEANO, CIELO: CIELOS, ESPUMA: ARRECIFE, CORAL: CORALES,
+         ARENA: DUNAS, LILA: LAVANDA, TENUE: TURQUESA}
 
 COLOR_ESTADO = {
-    comun.PENDIENTE: AMARILLO,
-    comun.BUSCANDO: AZUL,
-    comun.DESCARGANDO: AMBAR,
-    comun.LISTO: VERDE,
-    comun.FALLIDO: ROJO,
+    comun.PENDIENTE: LILA,
+    comun.BUSCANDO: CIELO,
+    comun.DESCARGANDO: AGUA,
+    comun.LISTO: ESPUMA,
+    comun.FALLIDO: CORAL,
     comun.CANCELADO: TENUE,
 }
 
+# Los 16 primeros cambian con cada terminal; éstos (los de xterm) sólo sirven
+# para aproximar.
+_BASICOS = ((0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238),
+            (205, 0, 205), (0, 205, 205), (229, 229, 229), (127, 127, 127),
+            (255, 0, 0), (0, 255, 0), (255, 255, 0), (92, 92, 255), (255, 0, 255),
+            (0, 255, 255), (255, 255, 255))
+
+
+def _rgb256(n):
+    if n < 16:
+        return _BASICOS[n]
+    if n < 232:
+        n -= 16
+        niveles = (0, 95, 135, 175, 215, 255)
+        return (niveles[n // 36], niveles[n // 6 % 6], niveles[n % 6])
+    gris = 8 + (n - 232) * 10
+    return (gris, gris, gris)
+
+
+RGB = tuple(_rgb256(n) for n in range(256))
+# Lo que pone la terminal cuando no se pide color. No hay forma portátil de
+# preguntarlo; para mezclar basta con suponer un fondo oscuro y un texto claro.
+FONDO_TERMINAL = 234
+TINTA_TERMINAL = 252
+
+_PALETA = {"colores": 256, "tema": TEMA_256, "por_defecto": True}
+_PARES = {}
+_ATRIBUTOS = {}
+_CERCANOS = {}
+_MEZCLAS = {}
+
+
+def cercano(rgb, candidatos=range(16, 256)):
+    """El color de la paleta más parecido a `rgb` (distancia «redmean»)."""
+    clave = (rgb, candidatos.start, candidatos.stop)
+    mejor = _CERCANOS.get(clave)
+    if mejor is None:
+        r, g, b = rgb
+        distancia = None
+        for n in candidatos:
+            r2, g2, b2 = RGB[n]
+            media = (r + r2) / 2
+            d = ((2 + media / 256) * (r - r2) ** 2 + 4 * (g - g2) ** 2
+                 + (2 + (255 - media) / 256) * (b - b2) ** 2)
+            if distancia is None or d < distancia:
+                mejor, distancia = n, d
+        _CERCANOS[clave] = mejor
+    return mejor
+
+
+def mezclar(a, b, t):
+    """El color de 256 que queda a `t` (de 0 a 1) del camino entre `a` y `b`."""
+    paso = int(max(0.0, min(1.0, t)) * 32 + 0.5)
+    clave = (a, b, paso)
+    color = _MEZCLAS.get(clave)
+    if color is None:
+        ra, rb = RGB[a], RGB[b]
+        u = paso / 32
+        color = cercano(tuple(int(x + (y - x) * u + 0.5) for x, y in zip(ra, rb)))
+        _MEZCLAS[clave] = color
+    return color
+
+
+def rampa(colores, t):
+    """El punto `t` (de 0 a 1) de un degradado de colores de 256."""
+    t = max(0.0, min(1.0, t))
+    pos = t * (len(colores) - 1)
+    i = int(pos)
+    if i >= len(colores) - 1:
+        return colores[-1]
+    return mezclar(colores[i], colores[i + 1], pos - i)
+
 
 def _iniciar_colores():
-    for indice in range(15):
-        _ATRIB[indice] = curses.A_NORMAL
+    _PARES.clear()
+    _ATRIBUTOS.clear()
     if not curses.has_colors():
-        _ATRIB[BLANCO] = curses.A_BOLD
-        _ATRIB[SEL] = curses.A_REVERSE
-        _ATRIB[INV] = curses.A_REVERSE | curses.A_BOLD
-        _ATRIB[MARCA] = curses.A_BOLD
-        for indice in (MARCA_AMBAR, MARCA_ROJO, MARCA_AZUL):
-            _ATRIB[indice] = curses.A_REVERSE | curses.A_BOLD
-        _ATRIB[TENUE] = curses.A_DIM
+        _PALETA.update(colores=0, tema=TEMA_SIN_COLOR)
         return
-
     curses.start_color()
     try:
         curses.use_default_colors()
-        fondo = -1
+        _PALETA["por_defecto"] = True
     except curses.error:
-        fondo = curses.COLOR_BLACK
+        _PALETA["por_defecto"] = False
+    if curses.COLORS >= 256:
+        _PALETA.update(colores=256, tema=TEMA_256)
+    else:
+        _PALETA.update(colores=max(8, min(curses.COLORS, 16)), tema=TEMA_BASICO)
 
-    muchos = curses.COLORS >= 256
-    tinta = {
-        AMBAR: 208 if muchos else curses.COLOR_YELLOW,
-        VERDE: 114 if muchos else curses.COLOR_GREEN,
-        ROJO: 203 if muchos else curses.COLOR_RED,
-        AZUL: 75 if muchos else curses.COLOR_CYAN,
-        AMARILLO: 179 if muchos else curses.COLOR_YELLOW,
-        VIOLETA: 141 if muchos else curses.COLOR_MAGENTA,
-        TENUE: 243 if muchos else curses.COLOR_BLUE,
-        BLANCO: 255 if muchos else curses.COLOR_WHITE,
-    }
-    for indice, color in tinta.items():
+
+def _ajustar(n):
+    """Un color de 256 llevado a lo que tenga la terminal."""
+    colores = _PALETA["colores"]
+    if n is None or n < 0 or colores >= 256:
+        return n
+    if colores == 0:
+        return -1
+    return cercano(RGB[n], range(1, colores))
+
+
+def _tinta(color, negrita=False):
+    """(frente, fondo, estilo) listos para la terminal. `color` es un tono del
+    tema (AGUA, TENUE…) o una tupla (frente, fondo) de la paleta de 256; un
+    fondo None deja el que ya hubiera debajo."""
+    if isinstance(color, tuple):
+        frente = _ajustar(color[0])
+        fondo = _ajustar(color[1]) if len(color) > 1 else None
+        estilo = color[2] if len(color) > 2 else 0
+    else:
+        frente, fondo, estilo = _PALETA["tema"].get(color, (-1, None, 0))
+    if negrita:
+        estilo |= NEGRITA
+    return frente, fondo, estilo
+
+
+def _par(frente, fondo):
+    """El número de par para (frente, fondo), creándolo la primera vez.
+
+    curses.color_pair() sólo entiende los 256 primeros pares; si se acabaran,
+    se reusa el más parecido que ya exista con el mismo fondo (cambiar un par
+    en uso repintaría de otro color lo que ya está en pantalla)."""
+    if not _PALETA["por_defecto"]:
+        frente = curses.COLOR_WHITE if frente < 0 else frente
+        fondo = curses.COLOR_BLACK if fondo < 0 else fondo
+    elif frente == -1 and fondo == -1:
+        return 0
+    clave = (frente, fondo)
+    numero = _PARES.get(clave)
+    if numero is None:
+        numero = len(_PARES) + 1
         try:
-            curses.init_pair(indice, color, fondo)
-            _ATRIB[indice] = curses.color_pair(indice)
-        except curses.error:
-            pass
-    _ATRIB[BLANCO] |= curses.A_BOLD
-    if not muchos:
-        _ATRIB[TENUE] |= curses.A_DIM
-
-    parejas = {
-        SEL: (255 if muchos else curses.COLOR_WHITE, 238 if muchos else curses.COLOR_BLUE),
-        INV: (16 if muchos else curses.COLOR_BLACK, 208 if muchos else curses.COLOR_YELLOW),
-        MARCA: (157 if muchos else curses.COLOR_GREEN, 22 if muchos else curses.COLOR_BLACK),
-        MARCA_AMBAR: (223 if muchos else curses.COLOR_BLACK, 94 if muchos else curses.COLOR_YELLOW),
-        MARCA_ROJO: (224 if muchos else curses.COLOR_WHITE, 88 if muchos else curses.COLOR_RED),
-        MARCA_AZUL: (153 if muchos else curses.COLOR_WHITE, 24 if muchos else curses.COLOR_BLUE),
-    }
-    for indice, (frente, atras) in parejas.items():
-        try:
-            curses.init_pair(indice, frente, atras)
-            _ATRIB[indice] = curses.color_pair(indice)
-        except curses.error:
-            _ATRIB[indice] = curses.A_REVERSE
-    _ATRIB[INV] |= curses.A_BOLD
+            if numero >= min(curses.COLOR_PAIRS, 256):
+                raise OverflowError
+            curses.init_pair(numero, frente, fondo)
+        except OverflowError:
+            numero = _par_parecido(frente, fondo)
+        except (curses.error, ValueError):
+            numero = 0                  # la terminal no lo acepta: mejor sin color
+        _PARES[clave] = numero
+    return numero
 
 
-def at(color=NORMAL, negrita=False):
-    return _ATRIB.get(color, curses.A_NORMAL) | (curses.A_BOLD if negrita else 0)
+def _par_parecido(frente, fondo):
+    mejor, distancia = 0, None
+    destino = RGB[frente] if 0 <= frente < 256 else RGB[TINTA_TERMINAL]
+    for (f, b), numero in _PARES.items():
+        if b != fondo or not numero:
+            continue
+        rgb = RGB[f] if 0 <= f < 256 else RGB[TINTA_TERMINAL]
+        d = sum((x - y) ** 2 for x, y in zip(rgb, destino))
+        if distancia is None or d < distancia:
+            mejor, distancia = numero, d
+    return mejor
+
+
+def _atributo(frente, fondo, estilo):
+    clave = (frente, fondo, estilo)
+    atributo = _ATRIBUTOS.get(clave)
+    if atributo is None:
+        atributo = curses.A_NORMAL
+        if _PALETA["colores"]:
+            atributo |= curses.color_pair(_par(frente, fondo))
+        elif fondo == REVES:
+            atributo |= curses.A_REVERSE
+        if estilo & NEGRITA:
+            atributo |= curses.A_BOLD
+        if estilo & ATENUADO:
+            atributo |= curses.A_DIM
+        if estilo & INVERSO:
+            atributo |= curses.A_REVERSE
+        _ATRIBUTOS[clave] = atributo
+    return atributo
+
+
+# ─── Lienzo ───────────────────────────────────────────────────────────────────
+
+class Lienzo:
+    """La pantalla entera en memoria: cada cuadro se compone aquí y se vuelca
+    de una vez. Así el fondo es transparente (el texto respeta el que ya había
+    debajo, como el de una fila seleccionada) y se pueden aplicar efectos sobre
+    lo ya pintado: hundir lo que queda detrás de una ventana o pasar una ola
+    por una fila recién terminada.
+
+    Cada celda es (carácter, frente, fondo, estilo), con los colores ya
+    ajustados a la terminal."""
+
+    VACIA = (" ", -1, -1, 0)
+
+    def __init__(self):
+        self.alto = 0
+        self.ancho = 0
+        self.filas = []
+
+    def preparar(self, alto, ancho):
+        self.alto, self.ancho = alto, ancho
+        self.filas = [[self.VACIA] * ancho for _ in range(alto)]
+
+    def poner(self, y, x, texto, frente, fondo, estilo):
+        fila = self.filas[y]
+        if fondo is None:
+            for i, c in enumerate(texto, x):
+                fila[i] = (c, frente, fila[i][2], estilo)
+        else:
+            for i, c in enumerate(texto, x):
+                fila[i] = (c, frente, fondo, estilo)
+
+    def fondo(self, y, x0, x1, fondo):
+        """Cambia el fondo de un tramo sin tocar lo que hay escrito."""
+        if not 0 <= y < self.alto:
+            return
+        fila = self.filas[y]
+        for i in range(max(0, x0), min(self.ancho, x1)):
+            c = fila[i]
+            fila[i] = (c[0], c[1], fondo, c[3])
+
+    def atenuar(self, cuanto):
+        """Todo lo pintado se hunde hacia el fondo (0 nada, 1 del todo)."""
+        if cuanto <= 0:
+            return
+        if _PALETA["colores"] < 256:
+            for fila in self.filas:
+                for i, (c, f, b, e) in enumerate(fila):
+                    fila[i] = (c, f, b, (e | ATENUADO) & ~NEGRITA)
+            return
+        for fila in self.filas:
+            for i, (c, f, b, e) in enumerate(fila):
+                debajo = FONDO_TERMINAL if b < 0 else b
+                f = mezclar(TINTA_TERMINAL if f < 0 else f, debajo, cuanto)
+                if b >= 0:
+                    b = mezclar(b, FONDO_TERMINAL, cuanto)
+                fila[i] = (c, f, b, e & ~NEGRITA)
+
+    def volcar(self, win):
+        """Pasa el cuadro a curses por tramos del mismo color; curses sólo
+        manda a la terminal lo que cambió desde el cuadro anterior."""
+        alto, ancho = win.getmaxyx()
+        for y in range(min(alto, self.alto)):
+            fila = self.filas[y]
+            n = min(ancho, self.ancho)
+            x = 0
+            while x < n:
+                c, f, b, e = fila[x]
+                inicio = x
+                trozo = [c]
+                # en un espacio el color del texto no se ve: se junta con lo que siga
+                frente = None if (c == " " and not e & INVERSO) else f
+                x += 1
+                while x < n:
+                    c, f2, b2, e2 = fila[x]
+                    if b2 != b or e2 != e:
+                        break
+                    if c != " " or e & INVERSO:
+                        if frente is None:
+                            frente = f2
+                        elif f2 != frente:
+                            break
+                    trozo.append(c)
+                    x += 1
+                try:
+                    win.addstr(y, inicio, "".join(trozo),
+                               _atributo(f if frente is None else frente, b, e))
+                except curses.error:
+                    pass            # la última celda de la pantalla siempre lanza
+
+
+LIENZO = Lienzo()
+
+# Lo que se mueve avisa al pintarse; mientras algo se mueva, el cuadro
+# siguiente llega pronto (30 por segundo) y si no, la pantalla descansa.
+RITMO = {"animando": False}
+
+
+def _anima():
+    RITMO["animando"] = True
 
 
 # ─── Dibujo ───────────────────────────────────────────────────────────────────
 
 def escribir(win, y, x, texto, color=NORMAL, negrita=False, ancho=None):
-    """Escribe recortando a la ventana. Devuelve la x siguiente."""
+    """Escribe en el lienzo recortando a la pantalla. Devuelve la x siguiente.
+
+    `color` es un tono del tema o una tupla (frente, fondo) de 256 colores; si
+    no trae fondo, el texto conserva el que ya hubiera debajo."""
     if not texto:
         return x
-    alto, cols = win.getmaxyx()
-    if y < 0 or y >= alto or x < 0 or x >= cols:
+    lienzo = LIENZO
+    if y < 0 or y >= lienzo.alto or x < 0 or x >= lienzo.ancho:
         return x
-    limite = cols - x
+    limite = lienzo.ancho - x
     if ancho is not None:
         limite = min(limite, ancho)
     texto = texto[:limite]
     if not texto:
         return x
-    try:
-        win.addstr(y, x, texto, at(color, negrita))
-    except curses.error:
-        pass  # la última celda de la pantalla siempre lanza; no es un error
+    frente, fondo, estilo = _tinta(color, negrita)
+    lienzo.poner(y, x, texto, frente, fondo, estilo)
     return x + len(texto)
 
 
+def escribir_trozos(win, y, x, trozos, ancho=None):
+    """Trozos (texto, color) uno detrás de otro. Devuelve la x siguiente."""
+    fin = None if ancho is None else x + ancho
+    for texto, color in trozos:
+        sitio = None if fin is None else fin - x
+        if sitio is not None and sitio <= 0:
+            break
+        x = escribir(win, y, x, texto, NORMAL if color is None else color, ancho=sitio)
+    return x
+
+
 def pintar(win, y, x, ancho, color):
-    """Rellena de fondo, para una fila seleccionada."""
-    escribir(win, y, x, " " * max(0, ancho), color)
+    """Rellena de fondo: una fila seleccionada, el interior de una ventana."""
+    lienzo = LIENZO
+    if not 0 <= y < lienzo.alto:
+        return
+    x0, x1 = max(0, x), min(lienzo.ancho, x + ancho)
+    if x1 <= x0:
+        return
+    frente, fondo, estilo = _tinta(color)
+    lienzo.poner(y, x0, " " * (x1 - x0), frente, -1 if fondo is None else fondo, estilo)
 
 
 def elipsis(texto, ancho):
@@ -199,86 +506,254 @@ def rellenar(texto, ancho):
     return elipsis(texto, ancho).ljust(max(0, ancho))
 
 
-def barra_texto(ancho, frac):
-    """(lleno, vacío) de una barra con resolución de un octavo de celda."""
-    if ancho <= 0:
-        return "", ""
-    frac = max(0.0, min(1.0, frac))
-    total = frac * ancho
-    llenas = int(total)
-    resto = int((total - llenas) * 8)
-    lleno = BLOQUE * min(llenas, ancho)
-    if resto and len(lleno) < ancho:
-        lleno += OCTAVOS[resto]
-    return lleno, VACIO * max(0, ancho - len(lleno))
+# ─── Movimiento ───────────────────────────────────────────────────────────────
+# Todo lo que se mueve mide algo real: las burbujas, que algo trabaja; el sonar,
+# que se busca; las gotas, que se baja; la respiración, que se espera turno; el
+# brillo de una barra, que alguien la está llenando ahora mismo; el oleaje, la
+# velocidad. Nada se anima por adorno cuando no pasa nada.
+
+def suave(u):
+    """Arranca y llega despacio (cúbica), u de 0 a 1."""
+    u = max(0.0, min(1.0, u))
+    return 4 * u ** 3 if u < 0.5 else 1 - (-2 * u + 2) ** 3 / 2
 
 
-def barra(win, y, x, ancho, frac, color=AMBAR, vacio=TENUE):
-    """Barra con resolución de un octavo de celda."""
-    if ancho <= 0:
-        return x
-    lleno, hueco = barra_texto(ancho, frac)
-    x = escribir(win, y, x, lleno, color)
-    return escribir(win, y, x, hueco, vacio)
+def frenada(u):
+    """Sale deprisa y llega frenando (cúbica), u de 0 a 1."""
+    u = max(0.0, min(1.0, u))
+    return 1 - (1 - u) ** 3
 
 
 def girador(t=None):
+    """Burbujas que suben: algo está trabajando."""
+    _anima()
     t = time.monotonic() if t is None else t
-    return BRAILLE[int(t * 10) % len(BRAILLE)]
+    return BURBUJAS[int(t * 9) % len(BURBUJAS)]
 
 
-def pulso(t=None):
-    """Un bloque que respira: para lo que está esperando turno."""
+def gota(t=None):
+    """Gotas que caen: algo se está bajando."""
+    _anima()
     t = time.monotonic() if t is None else t
-    return ALTURAS[int((math.sin(t * 4) + 1) / 2 * 7 + 0.5)]
+    return GOTAS[int(t * 10) % len(GOTAS)]
+
+
+def sonar(t=None):
+    """(glifo, color): un punto que se abre en onda y se apaga, como un sonar."""
+    _anima()
+    t = time.monotonic() if t is None else t
+    fase = (t / 1.25) % 1.0
+    glifo = SONAR[min(len(SONAR) - 1, int(fase * len(SONAR)))]
+    return glifo, (rampa(CIELOS, 1.0 - 0.75 * fase),)
+
+
+def respiro(t=None, colores=LAVANDA, periodo=2.6):
+    """Un color que respira despacio, para lo que espera turno."""
+    _anima()
+    t = time.monotonic() if t is None else t
+    u = (math.sin(t * 2 * math.pi / periodo) + 1) / 2
+    return (rampa(colores, 0.25 + 0.65 * u),)
+
+
+def glifo_estado(estado, t=None):
+    """(glifo, color) del estado de una petición, con su movimiento si lo tiene."""
+    if estado == comun.BUSCANDO:
+        return sonar(t)
+    if estado == comun.PENDIENTE:
+        return GLIFO_ESTADO[estado], respiro(t)
+    if estado == comun.DESCARGANDO:
+        return gota(t), AGUA
+    return GLIFO_ESTADO.get(estado, "·"), COLOR_ESTADO.get(estado, NORMAL)
+
+
+def _juntar(trozos):
+    """Une los trozos seguidos del mismo color: menos llamadas a escribir."""
+    salida = []
+    for texto, color in trozos:
+        if salida and salida[-1][1] == color:
+            salida[-1] = (salida[-1][0] + texto, color)
+        else:
+            salida.append((texto, color))
+    return salida
+
+
+def barra_trozos(ancho, frac, color=AGUA, vacio=LINEA, vivo=False, t=None):
+    """Una barra de agua en trozos (texto, color). Se llena con resolución de
+    un octavo de celda; el cuerpo es de un azul parejo y el frente se aclara
+    como la cresta de una ola. Si `vivo`, un reflejo la recorre mientras algo
+    la está llenando de verdad."""
+    if ancho <= 0:
+        return []
+    frac = max(0.0, min(1.0, frac))
+    total = frac * ancho
+    llenas = min(ancho, int(total))
+    resto = int((total - llenas) * 8) if llenas < ancho else 0
+    colores = RAMPA.get(color)
+    centro = None
+    if vivo and total > 0:
+        _anima()
+        t = time.monotonic() if t is None else t
+        centro = ((t / 2.2) % 1.0) * (total + 10) - 5
+    celdas = llenas + (1 if resto else 0)
+    trozos = []
+    for i in range(celdas):
+        glifo = BLOQUE if i < llenas else OCTAVOS[resto]
+        if colores is None:
+            trozos.append((glifo, color))
+            continue
+        cresta = max(0.0, 1 - (celdas - 1 - i) / 3)     # las tres últimas celdas
+        tono = rampa(colores, 0.32 + 0.4 * cresta)
+        if centro is not None:
+            k = math.exp(-((i - centro) / 2.4) ** 2)
+            if k > 0.05:
+                tono = mezclar(tono, colores[-2], 0.6 * k)
+        trozos.append((glifo, (tono,)))
+    hueco = ancho - llenas - (1 if resto else 0)
+    if hueco > 0:
+        trozos.append((VACIO * hueco, vacio))
+    return _juntar(trozos)
+
+
+def barra(win, y, x, ancho, frac, color=AGUA, vacio=LINEA, vivo=False, t=None):
+    """Barra de agua (ver barra_trozos). Devuelve la x siguiente."""
+    return escribir_trozos(win, y, x, barra_trozos(ancho, frac, color, vacio, vivo, t))
+
+
+def corriente(ancho, t=None, color=AGUA):
+    """Algo pasa por la tubería sin que se sepa cuánto falta: un pulso de luz
+    que la recorre de izquierda a derecha. Trozos (texto, color)."""
+    if ancho <= 0:
+        return []
+    _anima()
+    t = time.monotonic() if t is None else t
+    colores = RAMPA.get(color, OCEANO)
+    cresta = rampa(colores, 0.85)
+    centro = ((t / 1.5) % 1.0) * (ancho + 10) - 5
+    trozos = []
+    for i in range(ancho):
+        k = math.exp(-((i - centro) / 2.2) ** 2)
+        if k < 0.08:
+            trozos.append((VACIO, LINEA))
+        else:
+            trozos.append(("━" if k > 0.4 else VACIO, (mezclar(COLOR_LINEA, cresta, k),)))
+    return _juntar(trozos)
 
 
 def chispa(muestras, ancho, techo=None):
-    """Sparkline de las últimas `ancho` muestras. Devuelve exactamente `ancho`."""
+    """La historia de la velocidad como una línea de agua: cada celda sube y se
+    aclara con su muestra. Trozos (texto, color), exactamente `ancho` celdas."""
     if ancho <= 0:
-        return ""
+        return []
     datos = list(muestras)[-ancho:]
     if not datos:
-        return " " * ancho
+        return [(" " * ancho, NORMAL)]
     techo = techo or max(datos) or 1.0
-    salida = "".join(
-        ALTURAS[max(0, min(7, int(v / techo * 7 + 0.5)))] for v in datos)
-    return salida.ljust(ancho)
+    trozos = []
+    for v in datos:
+        h = max(0, min(7, int(v / techo * 7 + 0.5)))
+        trozos.append((ALTURAS[h], (rampa(TURQUESA, 0.2 + 0.55 * h / 7),)))
+    if len(datos) < ancho:
+        trozos.append((" " * (ancho - len(datos)), NORMAL))
+    return _juntar(trozos)
 
 
 def medidor(velocimetro, ancho, t=None):
-    """VU de ocho alturas montado sobre la velocidad real.
+    """Oleaje de ocho alturas montado sobre la velocidad real.
 
     La altura media es la velocidad actual respecto al máximo que se ha visto;
-    encima va un rizo senoidal para que se mueva. Un peer lento se nota porque
-    el medidor se queda pegado abajo, no porque deje de moverse.
+    encima va un rizo senoidal para que se mueva, y cada celda se aclara al
+    subir, como la cresta de una ola. Un peer lento se nota porque el agua se
+    queda abajo y oscura, no porque deje de moverse. Trozos (texto, color).
     """
     if ancho <= 0:
-        return ""
+        return []
     if velocimetro.actual <= 0:
-        return ALTURAS[0] * ancho
+        return [(ALTURAS[0] * ancho, LINEA)]
+    _anima()
     t = time.monotonic() if t is None else t
     techo = max(velocimetro.historial, default=0.0) or velocimetro.actual
     nivel = min(1.0, velocimetro.actual / (techo or 1.0))
-    salida = []
+    trozos = []
     for i in range(ancho):
         onda = (math.sin(t * 5.1 + i * 0.85) + math.sin(t * 2.7 - i * 0.4) + 2) / 4
         v = nivel * (0.55 + 0.45 * onda)
-        salida.append(ALTURAS[max(0, min(7, int(v * 7 + 0.5)))])
-    return "".join(salida)
+        h = max(0, min(7, int(v * 7 + 0.5)))
+        trozos.append((ALTURAS[h], (rampa(OCEANO, 0.15 + 0.65 * h / 7),)))
+    return _juntar(trozos)
 
 
-def barrido(ancho, t=None, color=AMBAR):
-    """Barra indeterminada: un bloque que va y viene. Trozos (texto, color)."""
+def ola(ancho, t=None, altura=1.0, colores=OCEANO):
+    """La superficie del agua moviéndose, para las esperas sin medida: leer la
+    biblioteca, revisar la instalación. Trozos (texto, color)."""
     if ancho <= 0:
         return []
+    _anima()
     t = time.monotonic() if t is None else t
-    bloque = max(2, ancho // 5)
-    recorrido = max(1, ancho - bloque)
-    fase = (t * 1.1) % 2.0
-    pos = int((fase if fase <= 1 else 2 - fase) * recorrido + 0.5)
-    return [(VACIO * pos, TENUE), (BLOQUE * bloque, color),
-            (VACIO * max(0, ancho - pos - bloque), TENUE)]
+    trozos = []
+    for i in range(ancho):
+        v = (math.sin(t * 2.4 - i * 0.42) + 0.6 * math.sin(t * 1.5 + i * 0.21) + 1.6) / 3.2
+        h = max(0, min(7, int(v * altura * 7 + 0.5)))
+        trozos.append((ALTURAS[h], (rampa(colores, 0.1 + 0.85 * h / 7),)))
+    return _juntar(trozos)
+
+
+def brillo(texto, t=None, color=CIELO):
+    """Un reflejo que recorre el texto de izquierda a derecha: lo que se está
+    cargando. Trozos (texto, color)."""
+    if not texto:
+        return []
+    _anima()
+    t = time.monotonic() if t is None else t
+    colores = RAMPA.get(color, CIELOS)
+    centro = ((t / 1.8) % 1.0) * (len(texto) + 12) - 6
+    trozos = []
+    for i, c in enumerate(texto):
+        k = math.exp(-((i - centro) / 3.2) ** 2)
+        trozos.append((c, (rampa(colores, 0.5 + 0.5 * k),)))
+    return _juntar(trozos)
+
+
+def destello(y, x0, x1, u, tonos=ARRECIFE):
+    """Un destello del color de `tonos` cruza el texto de la fila de izquierda
+    a derecha, como el sol en la cresta de una ola: u va de 0 (entra) a 1 (ya
+    pasó). Toca sólo el color de las letras de lo ya pintado; en los tonos
+    claros la paleta tiene pasos de sobra para que el brillo corra suave."""
+    if _PALETA["colores"] < 256 or u >= 1 or not 0 <= y < LIENZO.alto:
+        return
+    cresta = tonos[-2]
+    centro = x0 - 6 + (x1 - x0 + 12) * suave(u)
+    fila = LIENZO.filas[y]
+    for cx in range(max(0, x0), min(LIENZO.ancho, x1)):
+        k = math.exp(-((cx - centro) / 3.5) ** 2)
+        c = fila[cx]
+        if k < 0.06 or c[0] == " ":
+            continue
+        actual = TINTA_TERMINAL if c[1] < 0 else c[1]
+        fila[cx] = (c[0], mezclar(actual, cresta, 0.9 * k), c[2], c[3] | NEGRITA)
+
+
+def cargando(texto, t=None, color=CIELO):
+    """Burbujas y el texto con su reflejo: «leyendo la biblioteca…»."""
+    return [(girador(t) + " ", color)] + brillo(texto, t, color)
+
+
+def espera(win, y0, alto, ancho, texto, t=None):
+    """Una espera que ocupa la vista: una ola en medio y debajo el texto con
+    su reflejo. Para lo que tarda sin poder decir cuánto falta."""
+    t = time.monotonic() if t is None else t
+    ancho_ola = max(8, min(34, ancho - 8))
+    y = y0 + max(0, alto // 2 - 2)
+    escribir_trozos(win, y, (ancho - ancho_ola) // 2, ola(ancho_ola, t, 0.9))
+    escribir_trozos(win, y + 2, max(0, (ancho - len(texto) - 2) // 2), cargando(texto, t))
+
+
+def caret(t=None):
+    """(glifo, color) del cursor de un campo de texto: late suave en vez de
+    encenderse y apagarse a golpes."""
+    _anima()
+    t = time.monotonic() if t is None else t
+    u = (math.sin(t * 2 * math.pi / 1.1) + 1) / 2
+    return "▍", (rampa(OCEANO, 0.3 + 0.55 * u),)
 
 
 def marquesina(texto, ancho, t=None):
@@ -286,6 +761,7 @@ def marquesina(texto, ancho, t=None):
     texto = texto or ""
     if len(texto) <= ancho:
         return texto.ljust(max(0, ancho))
+    _anima()
     t = time.monotonic() if t is None else t
     doble = texto + "   ·   "
     salto = int(t * 4) % len(doble)
@@ -319,8 +795,11 @@ def pintar_seccion(win, y, x, ancho, alto, titulo, filas, foco=None):
     """
     if alto < 1 or ancho <= 0:
         return
-    escribir(win, y, x, elipsis(titulo, ancho), NORMAL)
-    escribir(win, y, x + len(titulo) + 1, "─" * max(0, ancho - len(titulo) - 1), TENUE)
+    nombre, _, detalle = titulo.partition(" · ")
+    xx = escribir(win, y, x, elipsis(nombre, ancho), BLANCO)
+    if detalle:
+        xx = escribir(win, y, xx, elipsis(" · " + detalle, x + ancho - xx), TENUE)
+    escribir(win, y, xx + 1, VACIO * max(0, x + ancho - xx - 1), LINEA)
     sitio = alto - 1
     n = len(filas)
     if sitio <= 0:
@@ -453,6 +932,7 @@ class Datos:
         self.cambios = {}        # id -> (estado nuevo, monotonic): para el parpadeo
         self.eventos = deque()   # peticiones que cambiaron de estado: para los avisos
         self.aviso = ""
+        self.log_nuevas = (0, 0.0)  # cuántas líneas acaban de llegar y cuándo
 
         self._mtime_cola = -1.0
         self._tam_log = -1
@@ -500,9 +980,18 @@ class Datos:
             self._tam_log = tam
             try:
                 with open(comun.ARCHIVO_LOG, encoding="utf-8", errors="replace") as f:
-                    self.log = [l.rstrip("\n") for l in f.readlines()[-800:]]
+                    nuevo = [l.rstrip("\n") for l in f.readlines()[-800:]]
             except OSError:
-                self.log = []
+                nuevo = []
+            # El log sólo crece: lo que haya después de la última línea que ya
+            # teníamos es nuevo (la primera lectura no cuenta).
+            if self.log and nuevo and nuevo[-1] != self.log[-1]:
+                ultima = self.log[-1]
+                for i in range(len(nuevo) - 1, -1, -1):
+                    if nuevo[i] == ultima:
+                        self.log_nuevas = (len(nuevo) - 1 - i, time.monotonic())
+                        break
+            self.log = nuevo
 
         if self._ciclos % 4 == 1:                # cada segundo
             self._mirar_descargas()
@@ -673,6 +1162,7 @@ class Trabajo:
         self.total_bytes = 0
         self.hechos_bytes = 0
         self.orden = []          # pistas ya escritas, en orden
+        self.orden_t = []        # cuándo quedó escrita cada una (para pintarla)
         self.orden_ok = None
 
     @property
@@ -703,6 +1193,7 @@ class Trabajo:
         self.pista_bytes = self.pista_hechos = 0
         self.total_bytes = self.hechos_bytes = 0
         self.orden = []
+        self.orden_t = []
         self.orden_ok = None
         self.velocimetro.reiniciar()
         self.hilo = threading.Thread(target=self._correr, args=(funcion,), daemon=True)
@@ -724,6 +1215,7 @@ class Trabajo:
             self.album = ev["rel"]
             self.album_pistas = ev["pistas"]
             self.orden = []
+            self.orden_t = []
             self.orden_ok = None
         elif tipo == "pista":
             self.pista = ev["archivo"]
@@ -736,6 +1228,7 @@ class Trabajo:
             self.velocimetro.muestra(self.hechos_bytes)
         elif tipo == "pista_ok":
             self.orden.append(ev["archivo"])
+            self.orden_t.append(time.monotonic())
             self.pista_hechos = self.pista_bytes
         elif tipo == "orden":
             self.orden_ok = ev["ok"]
@@ -1019,7 +1512,7 @@ class VistaCola(Vista):
         if not lista:
             escribir(win, y0 + 1, 2, "La cola está vacía.", TENUE)
             escribir(win, y0 + 3, 2, "Pulsa ", TENUE)
-            escribir(win, y0 + 3, 8, "a", AMBAR, True)
+            escribir(win, y0 + 3, 8, "a", AGUA, True)
             escribir(win, y0 + 3, 10, " para pedir un álbum: «Artista - Álbum».", TENUE)
             return
 
@@ -1051,10 +1544,8 @@ class VistaCola(Vista):
             escribir(win, y0 + alto - 1, 1, "  ".join(partes), TENUE)
 
         if doble:
-            for y in range(y0, y0 + alto):
-                escribir(win, y, izq, "│", TENUE)
-            escribir(win, y0 - 1, izq, "┬", TENUE)
-            escribir(win, y0 + alto, izq, "┴", TENUE)
+            for y in range(y0 + 1, y0 + alto - 1):
+                escribir(win, y, izq, "│", LINEA)
             self._detalle(app, self.seleccion(app), y0, alto, izq + 2, ancho - izq - 3)
 
     def _fila(self, app, pet, y, ancho, activa):
@@ -1062,41 +1553,34 @@ class VistaCola(Vista):
         estado = pet["estado"]
         t = time.monotonic()
 
-        # Recién terminada: la fila parpadea un par de segundos en su color.
-        fondo = None
-        cambio = app.datos.cambios.get(pet["id"])
-        if (cambio and estado in comun.TERMINADOS and t - cambio[1] < 2.4
-                and int((t - cambio[1]) * 4) % 2 == 0):
-            fondo = {comun.LISTO: MARCA, comun.FALLIDO: MARCA_ROJO}.get(estado, SEL)
-        elif activa:
-            fondo = SEL
-        if fondo is not None:
-            pintar(win, y, 0, ancho, fondo)
-            pintar(win, y + 1, 0, ancho, fondo)
+        if activa:
+            for fila in (y, y + 1):
+                pintar(win, fila, 0, ancho, SEL)
+                escribir(win, fila, 0, "▎", AGUA)
 
-        if estado == comun.BUSCANDO:
-            glifo = girador(t)
-        elif estado == comun.PENDIENTE:
-            glifo = pulso(t)
-        else:
-            glifo = GLIFO_ESTADO.get(estado, "·")
-        escribir(win, y, 1, glifo, fondo if fondo is not None
-                 else COLOR_ESTADO.get(estado, NORMAL))
-
+        glifo, color = glifo_estado(estado, t)
+        escribir(win, y, 2, glifo, color)
         titulo = pet["consulta"]
         if activa:
-            titulo = marquesina(titulo, ancho - 4, t)
-        escribir(win, y, 3, elipsis(titulo, ancho - 4), fondo if fondo is not None
-                 else (BLANCO if estado in comun.EN_CURSO else NORMAL))
-        self._segunda_linea(app, pet, y + 1, 3, ancho - 4, fondo, t)
+            titulo = marquesina(titulo, ancho - 5, t)
+        escribir(win, y, 4, elipsis(titulo, ancho - 5),
+                 BLANCO if activa or estado in comun.EN_CURSO else NORMAL)
+        self._segunda_linea(app, pet, y + 1, 4, ancho - 5, t)
 
-    def _segunda_linea(self, app, pet, y, x, ancho, fondo, t):
+        # Recién terminada: un destello de su color cruza la fila, dos veces.
+        cambio = app.datos.cambios.get(pet["id"])
+        if cambio and estado in comun.TERMINADOS:
+            u = (t - cambio[1]) / 1.1
+            if u < 2:
+                _anima()
+                tonos = {comun.LISTO: ARRECIFE, comun.FALLIDO: CORALES}.get(estado, TURQUESA)
+                for fila in (y, y + 1):
+                    destello(fila, 0, ancho, u % 1.0, tonos)
+
+    def _segunda_linea(self, app, pet, y, x, ancho, t):
         """Debajo del título: la barra si está en marcha, el resultado si acabó."""
         win = app.pantalla
         estado = pet["estado"]
-
-        def tinta(color):
-            return fondo if fondo is not None else color
 
         if estado == comun.DESCARGANDO:
             p = pet.get("progreso") or {}
@@ -1104,36 +1588,37 @@ class VistaCola(Vista):
             frac = hechos / total
             cola = f" {int(frac * 100):>3} %  {hechos}/{total}"
             ancho_barra = max(6, ancho - len(cola))
-            barra(win, y, x, ancho_barra, frac, tinta(AMBAR), tinta(TENUE))
-            escribir(win, y, x + ancho_barra, cola, tinta(AMBAR))
+            barra(win, y, x, ancho_barra, frac, AGUA,
+                  vivo=app.datos.velocimetro.actual > 0, t=t)
+            escribir(win, y, x + ancho_barra, cola, AGUA)
         elif estado == comun.BUSCANDO:
             transcurrido = segundos_desde(pet.get("actualizado", ""))
             frac = min(1.0, transcurrido / VENTANA_BUSQUEDA)
             cola = (f" {int(transcurrido):>3} s" if transcurrido < VENTANA_BUSQUEDA
                     else " eligiendo")
             ancho_barra = max(6, ancho - len(cola))
-            barra(win, y, x, ancho_barra, frac, tinta(AZUL), tinta(TENUE))
-            escribir(win, y, x + ancho_barra, cola, tinta(AZUL))
+            barra(win, y, x, ancho_barra, frac, CIELO, t=t)
+            escribir(win, y, x + ancho_barra, cola, CIELO)
         elif estado == comun.PENDIENTE:
             mensaje = pet.get("mensaje") or ""
             reintento = mensaje.startswith("reintentando")
             texto = mensaje if reintento else "esperando turno"
             escribir(win, y, x, elipsis(f"{texto} · {desde(pet.get('actualizado', ''))}",
-                                        ancho), tinta(AMARILLO if reintento else TENUE))
+                                        ancho), ARENA if reintento else TENUE)
         elif estado == comun.LISTO and pet.get("resultado"):
             r = pet["resultado"]
             faltan = r.get("faltantes") or []
             if faltan:
                 escribir(win, y, x, elipsis(f"{AVISO} falta " + ", ".join(
-                    f"{n:02d}" for n in faltan), ancho), tinta(AMARILLO))
+                    f"{n:02d}" for n in faltan), ancho), ARENA)
             else:
                 escribir(win, y, x, elipsis(f"{r['pistas']} pistas · {r['calidad']}", ancho),
-                         tinta(TENUE))
+                         TENUE)
         elif pet.get("mensaje"):
             escribir(win, y, x, elipsis(pet["mensaje"], ancho),
-                     tinta(ROJO if estado == comun.FALLIDO else TENUE))
+                     CORAL if estado == comun.FALLIDO else TENUE)
         else:
-            escribir(win, y, x, desde(pet.get("actualizado", "")), tinta(TENUE))
+            escribir(win, y, x, desde(pet.get("actualizado", "")), TENUE)
 
     # ── el detalle de la derecha ──
     def _detalle(self, app, pet, y0, alto, x, ancho):
@@ -1148,18 +1633,14 @@ class VistaCola(Vista):
         estado = pet["estado"]
         tope = y0 + alto
 
-        if estado == comun.BUSCANDO:
-            glifo = girador(t)
-        elif estado == comun.PENDIENTE:
-            glifo = pulso(t)
-        else:
-            glifo = GLIFO_ESTADO.get(estado, "·")
-        derecha = f"{glifo} {estado} · {desde(pet.get('actualizado', ''))}"
-        escribir(win, y0, x, elipsis(pet["consulta"], max(8, ancho - len(derecha) - 2)),
+        glifo, color_glifo = glifo_estado(estado, t)
+        derecha = f"{estado} · {desde(pet.get('actualizado', ''))}"
+        escribir(win, y0, x, elipsis(pet["consulta"], max(8, ancho - len(derecha) - 4)),
                  BLANCO)
+        escribir(win, y0, x + ancho - len(derecha) - 2, glifo, color_glifo)
         escribir(win, y0, x + ancho - len(derecha), derecha,
                  COLOR_ESTADO.get(estado, NORMAL))
-        escribir(win, y0 + 1, x, "─" * ancho, TENUE)
+        escribir(win, y0 + 1, x, VACIO * ancho, LINEA)
         y = y0 + 2
 
         campos = self._campos(app, pet)
@@ -1184,7 +1665,7 @@ class VistaCola(Vista):
             col = (ancho - 3) // 2
             self._apilar(win, y, x, col, resto, secciones[:1])
             for yy in range(y + 1, tope):
-                escribir(win, yy, x + col + 1, "│", TENUE)
+                escribir(win, yy, x + col + 1, "│", LINEA)
             self._apilar(win, y, x + col + 3, ancho - col - 3, resto, secciones[1:])
         else:
             self._apilar(win, y, x, ancho, resto, secciones)
@@ -1220,42 +1701,42 @@ class VistaCola(Vista):
                   ("tipo", "canción suelta" if pet.get("tipo") == "cancion" else "álbum",
                    NORMAL, 3)]
         if pet.get("lista"):
-            campos.append(("lista", pet["lista"], VIOLETA, 2))
+            campos.append(("lista", pet["lista"], LILA, 2))
         if estado == comun.BUSCANDO:
             consulta = pet["consulta"]
             termino = consulta if "flac" in consulta.casefold() else f"{consulta} flac"
-            campos.append(("término", termino, AZUL, 1))
+            campos.append(("término", termino, CIELO, 1))
         if estado == comun.PENDIENTE:
             activas = [p["id"] for p in app.datos.activas()]
             delante = activas.index(pet["id"]) if pet["id"] in activas else 0
             campos.append(("turno", "es la siguiente" if delante == 0
-                           else f"{delante} por delante", AMARILLO, 1))
+                           else f"{delante} por delante", ARENA, 1))
         cand = pet.get("candidato") or {}
         if cand:
             campos.append(("fuente", f"{cand.get('usuario', '?')} · "
-                                     f"{cand.get('puntos', '?')} pts", AMBAR, 1))
+                                     f"{cand.get('puntos', '?')} pts", AGUA, 1))
             campos.append(("carpeta", os.path.basename(
                 (cand.get("carpeta") or "").replace("\\", "/")), NORMAL, 3))
             campos.append(("calidad", cand.get("detalle", ""), NORMAL,
                            1 if estado == comun.DESCARGANDO else 2))
         resultado = pet.get("resultado") or {}
         if resultado:
-            campos.append(("destino", resultado.get("carpeta", ""), VERDE, 1))
+            campos.append(("destino", resultado.get("carpeta", ""), ESPUMA, 1))
             if resultado.get("faltantes"):
                 campos.append(("faltan", ", ".join(
-                    f"{n:02d}" for n in resultado["faltantes"]), AMARILLO, 1))
+                    f"{n:02d}" for n in resultado["faltantes"]), ARENA, 1))
         if estado in comun.TERMINADOS:
             tardo = duracion_entre(creado, pet.get("actualizado", ""))
             if tardo:
                 campos.append(("tardó", tardo, TENUE, 2))
         if pet.get("intentos"):
-            campos.append(("intentos", f"{pet['intentos']} agotado(s)", AMARILLO, 3))
+            campos.append(("intentos", f"{pet['intentos']} agotado(s)", ARENA, 3))
         if pet.get("rechazados"):
             campos.append(("descartes", f"{len(pet['rechazados'])} fuente(s)", TENUE, 3))
         mensaje = pet.get("mensaje") or ""
         if mensaje and estado in (comun.FALLIDO, comun.CANCELADO):
             campos.append(("motivo" if estado == comun.FALLIDO else "nota", mensaje,
-                           ROJO if estado == comun.FALLIDO else TENUE, 1))
+                           CORAL if estado == comun.FALLIDO else TENUE, 1))
         return campos
 
     def _vivo(self, app, pet, y, x, ancho, tope, t, holgado=True):
@@ -1275,9 +1756,12 @@ class VistaCola(Vista):
             cola = f"  {int(frac * 100):>3} %  {hechos} de {total} pistas"
             ancho_barra = max(8, min(60, ancho - 10 - len(cola)))
             escribir(win, y, x, rellenar("progreso", 10), TENUE)
-            barra(win, y, x + 10, ancho_barra, frac)
-            escribir(win, y, x + 10 + ancho_barra, cola, AMBAR)
-            y += 1
+            barra(win, y, x + 10, ancho_barra, frac, AGUA,
+                  vivo=app.datos.velocimetro.actual > 0, t=t)
+            escribir(win, y, x + 10 + ancho_barra, cola, AGUA)
+            # una fila de aire: la barra y el oleaje de debajo son bloques
+            # macizos y, pegados, se leen como una sola mancha
+            y += 1 + hueco
             if y < tope:
                 v = app.datos.velocimetro
                 escribir(win, y, x, rellenar("velocidad", 10), TENUE)
@@ -1293,10 +1777,10 @@ class VistaCola(Vista):
                     fin -= len(bajado) + 2
                 sitio = fin - xx
                 if sitio >= 8:
-                    xx = escribir(win, y, xx, medidor(v, min(16, sitio), t), AMBAR) + 2
+                    xx = escribir_trozos(win, y, xx, medidor(v, min(16, sitio), t)) + 2
                 sitio = fin - xx
                 if sitio >= 8:
-                    escribir(win, y, xx, chispa(v.historial, min(30, sitio)), AZUL)
+                    escribir_trozos(win, y, xx, chispa(v.historial, min(30, sitio)))
                 y += 1
 
         elif estado == comun.BUSCANDO:
@@ -1305,17 +1789,18 @@ class VistaCola(Vista):
             frac = min(1.0, transcurrido / VENTANA_BUSQUEDA)
             if transcurrido < VENTANA_BUSQUEDA:
                 cola = f"  {int(transcurrido):>2} s de {VENTANA_BUSQUEDA} · acumulando resultados"
-                color = AZUL
+                color = CIELO
             elif transcurrido < VENTANA_BUSQUEDA + 6:
-                cola, color = "  puntuando lo que llegó", AZUL
+                cola, color = "  puntuando lo que llegó", CIELO
             else:
                 cola = (f"  sin resultados aún · el plugin espera hasta "
                         f"{VENTANA_BUSQUEDA * 3} s")
-                color = AMARILLO
+                color = ARENA
             ancho_barra = max(8, min(40, ancho - 12 - len(cola)))
             escribir(win, y, x, rellenar("búsqueda", 10), TENUE)
-            escribir(win, y, x + 10, girador(t), AZUL)
-            barra(win, y, x + 12, ancho_barra, frac, AZUL)
+            glifo, color_glifo = sonar(t)
+            escribir(win, y, x + 10, glifo, color_glifo)
+            barra(win, y, x + 12, ancho_barra, frac, CIELO, t=t)
             escribir(win, y, x + 12 + ancho_barra, elipsis(cola, ancho - 12 - ancho_barra),
                      color)
             y += 1
@@ -1324,12 +1809,12 @@ class VistaCola(Vista):
             y += hueco
             escribir(win, y, x, rellenar("turno", 10), TENUE)
             if app.datos.nicotine_vivo():
-                texto = f"{pulso(t)} esperando a que el plugin la tome"
-                color = TENUE
+                escribir(win, y, x + 10, GLIFO_ESTADO[comun.PENDIENTE], respiro(t))
+                escribir(win, y, x + 12, elipsis("esperando a que el plugin la tome",
+                                                 ancho - 12), TENUE)
             else:
-                texto = f"{AVISO} Nicotine+ está cerrado: la cola no avanza"
-                color = AMARILLO
-            escribir(win, y, x + 10, elipsis(texto, ancho - 10), color)
+                escribir(win, y, x + 10, elipsis(
+                    f"{AVISO} Nicotine+ está cerrado: la cola no avanza", ancho - 10), ARENA)
             y += 1
         return y
 
@@ -1345,12 +1830,15 @@ class VistaCola(Vista):
             return None
         ruta = os.path.join(comun.RAIZ_BIBLIOTECA, carpeta)
         if not os.path.isdir(ruta):
-            return ("pistas", [([(f"{AVISO} la carpeta ya no está en {carpeta}", AMARILLO)], [])],
+            # quizá se pasó a la heredada con h, para compartirla
+            ruta = os.path.join(Biblioteca.RAIZ_HEREDADA, carpeta)
+        if not os.path.isdir(ruta):
+            return ("pistas", [([(f"{AVISO} la carpeta ya no está en {carpeta}", ARENA)], [])],
                     None)
         app.biblioteca.pedir_analisis({"dir": ruta})
         det = app.biblioteca.detalle.get(ruta)
         if det is None:
-            return ("pistas", [([(f"{girador(t)} leyendo las pistas…", AZUL)], [])], None)
+            return ("pistas", [(cargando("leyendo las pistas…", t), [])], None)
 
         pistas = sorted(det["pistas"], key=lambda p: (p.get("disco") or 1, p.get("pista") or 0))
         faltan = set(det.get("huecos") or [])
@@ -1360,17 +1848,17 @@ class VistaCola(Vista):
             while faltan and min(faltan) < (n or 0):
                 h = min(faltan)
                 faltan.discard(h)
-                filas.append(([(f"{h:02d}  ", AMARILLO), ("— falta —", AMARILLO)], []))
+                filas.append(([(f"{h:02d}  ", ARENA), ("— falta —", ARENA)], []))
             total += p.get("tamaño", 0)
             filas.append(([(f"{n:02d}  " if n else "··  ", TENUE),
                            (p.get("titulo") or p["archivo"], NORMAL)],
                           [(duracion(p.get("duracion")), TENUE), ("  ", None),
                            (f"{comun.formato_bytes(p.get('tamaño', 0)):>9}", TENUE),
-                           ("  ", None), (OK, VERDE)]))
+                           ("  ", None), (OK, ESPUMA)]))
         for h in sorted(faltan):
-            filas.append(([(f"{h:02d}  ", AMARILLO), ("— falta —", AMARILLO)], []))
+            filas.append(([(f"{h:02d}  ", ARENA), ("— falta —", ARENA)], []))
         if not filas:
-            filas.append(([(det.get("calidad") or "sin pistas legibles", AMARILLO)], []))
+            filas.append(([(det.get("calidad") or "sin pistas legibles", ARENA)], []))
         titulo = f"pistas · {len(pistas)} · {det.get('calidad', '')} · {comun.formato_bytes(total)}"
         return (titulo, filas, None)
 
@@ -1382,7 +1870,7 @@ class VistaCola(Vista):
         filas = []
         for i, (nombre, b) in enumerate(datos.bajados, 1):
             filas.append(([(f"{i:02d}  ", TENUE), (_sin_numero(nombre), NORMAL)],
-                          [(f"{comun.formato_bytes(b):>9}", TENUE), ("  ", None), (OK, VERDE)]))
+                          [(f"{comun.formato_bytes(b):>9}", TENUE), ("  ", None), (OK, ESPUMA)]))
         foco = None
         v = datos.velocimetro
         for nombre, b in datos.incompletos:
@@ -1390,14 +1878,14 @@ class VistaCola(Vista):
             foco = len(filas)
             filas.append(([(f"{len(filas) + 1:02d}  ", BLANCO),
                            (_sin_numero(nombre), BLANCO)],
-                          barrido(10 if ancho >= 50 else 6, t)
-                          + [(f" {comun.formato_bytes(estimado):>9}", AMBAR)]))
+                          corriente(10 if ancho >= 50 else 6, t)
+                          + [(f" {comun.formato_bytes(estimado):>9}", AGUA)]))
         pendientes = total - len(filas)
         for _i in range(max(0, pendientes)):
-            filas.append(([(f"{len(filas) + 1:02d}  ", TENUE), ("pendiente", TENUE)],
-                          [(GLIFO_ESTADO[comun.PENDIENTE], TENUE)]))
+            filas.append(([(f"{len(filas) + 1:02d}  ", LINEA), ("pendiente", TENUE)],
+                          [("·", LINEA)]))
         if not filas:
-            filas.append(([(f"{girador(t)} esperando al primer archivo…", TENUE)], []))
+            filas.append((cargando("esperando al primer archivo…", t, TENUE), []))
         titulo = f"pistas · {hechos} de {total} bajadas"
         return (titulo, filas, foco)
 
@@ -1415,15 +1903,15 @@ class VistaCola(Vista):
             clave = (c["usuario"], c["carpeta"])
             es_elegida = clave == elegida
             es_descartada = clave in descartadas
-            izq = [(f"{c['puntos']:>4}  ", AMBAR if es_elegida else TENUE),
+            izq = [(f"{c['puntos']:>4}  ", AGUA if es_elegida else TENUE),
                    (rellenar(c["usuario"], 16) + "  ", BLANCO if es_elegida else NORMAL)]
             if ancho >= 56:
                 izq.append((rellenar(c["detalle"], 28) + "  ", TENUE))
             if ancho >= 84:
                 izq.append((c["carpeta"], TENUE))
             corto = ancho < 70
-            der = ([("◂" if corto else "◂ elegida", AMBAR)] if es_elegida
-                   else [(MAL if corto else f"{MAL} descartada", ROJO)] if es_descartada
+            der = ([("◂" if corto else "◂ elegida", AGUA)] if es_elegida
+                   else [(MAL if corto else f"{MAL} descartada", CORAL)] if es_descartada
                    else [])
             filas.append((izq, der))
         return (f"fuentes · {len(filas)} candidatas", filas, None)
@@ -1602,10 +2090,15 @@ class VistaBiblioteca(Vista):
         win = app.pantalla
         bib = app.biblioteca
         if bib.cargando or not bib.cargada:
-            escribir(win, y0 + 1, 2, f"{girador()} leyendo la biblioteca…", AZUL)
+            espera(win, y0, alto, ancho, "leyendo la biblioteca…")
             return
         if not bib.artistas:
-            escribir(win, y0 + 1, 2, f"No hay ningún artista en {bib.raiz}", TENUE)
+            casa = os.path.expanduser("~")
+            escribir(win, y0 + 1, 2, f"No hay ningún artista en {bib.raiz.replace(casa, '~')}",
+                     TENUE)
+            if not bib.heredada and os.path.isdir(bib.RAIZ_HEREDADA):
+                x = escribir(win, y0 + 3, 2, "b", AGUA, True)
+                escribir(win, y0 + 3, x + 1, "muestra la heredada", TENUE)
             return
 
         self._resituar(app)
@@ -1620,16 +2113,15 @@ class VistaBiblioteca(Vista):
         for col in range(3):
             if col and anchos[col] > 0:
                 for y in range(y0, y0 + alto):
-                    escribir(win, y, x, "│", TENUE)
-                escribir(win, y0 - 1, x, "┬", TENUE)
-                escribir(win, y0 + alto, x, "┴", TENUE)
+                    escribir(win, y, x, "│", LINEA)
                 x += 1
             self._columna(app, col, y0, alto, x, anchos[col])
             x += anchos[col]
 
         if self.filtro:
-            escribir(win, y0 + alto - 1, 1,
-                     elipsis(f"buscando «{self.filtro}»", ancho - 2), AMBAR)
+            escribir(win, y0 + alto - 1, 1, "/", AGUA, True)
+            escribir(win, y0 + alto - 1, 3,
+                     elipsis(f"«{self.filtro}»", ancho - 4), BLANCO)
 
     @staticmethod
     def _anchos(ancho):
@@ -1659,7 +2151,7 @@ class VistaBiblioteca(Vista):
                 tinta = NORMAL
                 if detalle and detalle["huecos"]:
                     sufijo = AVISO + sufijo
-                    tinta = AMARILLO
+                    tinta = ARENA
                 filas.append((item["album"], sufijo, tinta, item["rel"] in app.marcados))
         else:
             filas = []
@@ -1687,15 +2179,15 @@ class VistaBiblioteca(Vista):
             y = y0 + fila
             elegido = indice == self.cursor[col]
             enfocado = elegido and col == self.columna
-            if elegido:
-                pintar(win, y, x, ancho, SEL if enfocado else NORMAL)
+            if enfocado:
+                pintar(win, y, x, ancho, SEL)
+                escribir(win, y, x, "▎", AGUA)
             if marcado:
-                escribir(win, y, x, "▸", SEL if enfocado else VERDE)
-            hueco = ancho - 2 - len(sufijo) - 1
-            escribir(win, y, x + 1, elipsis(texto, hueco),
-                     SEL if enfocado else (BLANCO if elegido else tinta))
+                escribir(win, y, x + 1, "▸", ESPUMA)
+            hueco = ancho - 3 - len(sufijo) - 1
+            escribir(win, y, x + 2, elipsis(texto, hueco), BLANCO if elegido else tinta)
             escribir(win, y, x + ancho - len(sufijo) - 1, sufijo,
-                     SEL if enfocado else TENUE)
+                     CIELO if enfocado else TENUE)
 
     def tecla(self, app, k):
         col = self.columna
@@ -1726,7 +2218,7 @@ class VistaBiblioteca(Vista):
                     app.avisar(f"desmarcado {item['rel']}")
                 else:
                     app.marcados.add(item["rel"])
-                    app.avisar(f"marcado {item['rel']}", VERDE)
+                    app.avisar(f"marcado {item['rel']}", ESPUMA)
         elif k == "c":
             item = self.album(app)
             if not app.marcados and item:
@@ -1740,7 +2232,7 @@ class VistaBiblioteca(Vista):
             app.abrir(OverlayBuscar(self))
         elif k == "r":
             app.biblioteca.cargar()
-            app.avisar("releyendo la biblioteca…", AZUL, 2)
+            app.avisar("releyendo la biblioteca…", CIELO, 2)
         elif k == "b":
             app.biblioteca.cambiar_raiz()
             self.cursor = [0, 0, 0]
@@ -1768,11 +2260,11 @@ class VistaBiblioteca(Vista):
 
     def _pedir_heredar(self, app):
         if app.biblioteca.heredada:
-            app.avisar("ya estás en la heredada; pulsa b para volver a la nueva", AMARILLO)
+            app.avisar("ya estás en la heredada; pulsa b para volver a la nueva", ARENA)
             return
         albumes = self.a_heredar(app)
         if not albumes:
-            app.avisar("no hay nada que pasar a la heredada", AMARILLO)
+            app.avisar("no hay nada que pasar a la heredada", ARENA)
             return
         peso = comun.formato_bytes(sum(a["bytes"] for a in albumes))
         if len(albumes) == 1:
@@ -1798,9 +2290,9 @@ class VistaBiblioteca(Vista):
         titulo = pista.get("titulo") or pista["archivo"]
         error = app.reproductor.tocar(pista["ruta"], titulo)
         if error:
-            app.avisar(error, ROJO)
+            app.avisar(error, CORAL)
         else:
-            app.avisar(f"sonando {titulo}", VERDE)
+            app.avisar(f"sonando {titulo}", ESPUMA)
 
 
 class VistaFiio(Vista):
@@ -1855,7 +2347,7 @@ class VistaFiio(Vista):
         destino = self.montaje(app)
         y = y0
         if destino is None:
-            escribir(win, y, 2, "No hay ninguna tarjeta montada.", AMARILLO)
+            escribir(win, y, 2, "No hay ninguna tarjeta montada.", ARENA)
             escribir(win, y + 2, 2,
                      "Conecta el FiiO o el lector de la microSD; aparece sola.", TENUE)
             escribir(win, y + 3, 2,
@@ -1866,18 +2358,17 @@ class VistaFiio(Vista):
                 elegido = i == self.destino
                 if elegido:
                     pintar(win, y, 0, ancho, SEL)
-                escribir(win, y, 1, "▸" if elegido else " ", SEL if elegido else TENUE)
-                escribir(win, y, 3, elipsis(d["montaje"], ancho - 34),
-                         SEL if elegido else NORMAL)
+                    escribir(win, y, 0, "▎", AGUA)
+                escribir(win, y, 2, elipsis(d["montaje"], ancho - 34),
+                         BLANCO if elegido else NORMAL)
                 cola = (f"{d['tipo']}  {comun.formato_bytes(d['libre'])} libres "
                         f"de {comun.formato_bytes(d['total'])}")
-                escribir(win, y, max(4, ancho - len(cola) - 2), cola,
-                         SEL if elegido else TENUE)
+                escribir(win, y, max(4, ancho - len(cola) - 2), cola, TENUE)
                 y += 1
             y += 1
             if destino["tipo"] not in ("vfat", "exfat", "msdos"):
                 escribir(win, y, 2, f"{AVISO} es {destino['tipo']}: no puedo verificar "
-                                    f"el orden físico de las entradas", AMARILLO)
+                                    f"el orden físico de las entradas", ARENA)
                 y += 2
 
         bytes_plan = sum(a["bytes"] for a in self.plan)
@@ -1888,7 +2379,7 @@ class VistaFiio(Vista):
         y += 1
         escribir(win, y, 2, rellenar("plan", 10), TENUE)
         if self.calculando:
-            escribir(win, y, 12, f"{girador()} calculando…", AZUL)
+            escribir_trozos(win, y, 12, cargando("calculando…"))
         else:
             escribir(win, y, 12, f"{len(self.plan)} álbumes · {pistas} pistas · "
                                  f"{comun.formato_bytes(bytes_plan)}  ({origen})", BLANCO)
@@ -1902,13 +2393,13 @@ class VistaFiio(Vista):
             escribir(win, y, 2, rellenar("espacio", 10), TENUE)
             ancho_barra = max(10, min(40, ancho - 34))
             usado = 1 - (libre / destino["total"]) if destino["total"] else 0
-            barra(win, y, 12, ancho_barra, usado, VERDE if libre > bytes_plan else ROJO)
+            barra(win, y, 12, ancho_barra, usado, ESPUMA if libre > bytes_plan else CORAL)
             escribir(win, y, 12 + ancho_barra + 1,
                      f"{comun.formato_bytes(libre)} libres", TENUE)
             y += 1
             if bytes_plan > libre:
                 escribir(win, y, 2, f"{MAL} no cabe: faltan "
-                                    f"{comun.formato_bytes(bytes_plan - libre)}", ROJO)
+                                    f"{comun.formato_bytes(bytes_plan - libre)}", CORAL)
                 y += 1
         y += 1
 
@@ -1933,17 +2424,23 @@ class VistaFiio(Vista):
         trabajo = app.trabajo
         y = y0
         activo = trabajo.activo
-        escribir(win, y, 2, trabajo.titulo, BLANCO)
+        t = time.monotonic()
         if activo:
-            escribir(win, y, 2 + len(trabajo.titulo) + 1, girador(), AZUL)
+            escribir(win, y, 2, girador(t), CIELO)
+            escribir(win, y, 4, trabajo.titulo, BLANCO)
+        else:
+            escribir(win, y, 2, OK if not (trabajo.resumen or {}).get("errores") else MAL,
+                     ESPUMA if not (trabajo.resumen or {}).get("errores") else CORAL)
+            escribir(win, y, 4, trabajo.titulo, BLANCO)
         y += 2
 
         if trabajo.total_bytes:
             frac = min(1.0, trabajo.hechos_bytes / trabajo.total_bytes)
             escribir(win, y, 2, rellenar("total", 10), TENUE)
             ancho_barra = max(10, ancho - 34)
-            barra(win, y, 12, ancho_barra, frac)
-            escribir(win, y, 12 + ancho_barra + 1, f"{int(frac * 100):>3} %", AMBAR)
+            barra(win, y, 12, ancho_barra, frac, AGUA,
+                  vivo=activo and trabajo.velocimetro.actual > 0, t=t)
+            escribir(win, y, 12 + ancho_barra + 1, f"{int(frac * 100):>3} %", AGUA)
             y += 1
             escribir(win, y, 12,
                      f"{comun.formato_bytes(trabajo.hechos_bytes)} de "
@@ -1951,12 +2448,13 @@ class VistaFiio(Vista):
             velocidad = f"{comun.formato_bytes(trabajo.velocimetro.actual)}/s"
             xx = escribir(win, y, max(13, ancho - len(velocidad) - 40), velocidad, BLANCO) + 2
             sitio = ancho - 2 - xx
-            if sitio >= 14:
-                xx = escribir(win, y, xx, medidor(trabajo.velocimetro, min(14, sitio - 2)),
-                              AMBAR) + 2
+            if sitio >= 14 and activo:
+                xx = escribir_trozos(win, y, xx, medidor(trabajo.velocimetro,
+                                                         min(14, sitio - 2), t)) + 2
             sitio = ancho - 2 - xx
             if sitio >= 8:
-                escribir(win, y, xx, chispa(trabajo.velocimetro.historial, min(22, sitio)), AZUL)
+                escribir_trozos(win, y, xx, chispa(trabajo.velocimetro.historial,
+                                                   min(22, sitio)))
             y += 2
 
         if trabajo.album:
@@ -1971,7 +2469,8 @@ class VistaFiio(Vista):
             y += 1
             if trabajo.pista_bytes:
                 frac = min(1.0, trabajo.pista_hechos / trabajo.pista_bytes)
-                barra(win, y, 12, max(10, min(40, ancho - 20)), frac, AMBAR)
+                barra(win, y, 12, max(10, min(40, ancho - 20)), frac, CIELO,
+                      vivo=activo and frac < 1, t=t)
                 y += 1
         if trabajo.album_pistas:
             escribir(win, y, 2, rellenar("orden", 10), TENUE)
@@ -1979,27 +2478,37 @@ class VistaFiio(Vista):
             for i in range(trabajo.album_pistas):
                 if x + 3 > ancho - 1:
                     break
-                hecho = i < len(trabajo.orden)
-                x = escribir(win, y, x, f"{i + 1:02d} " if hecho else "·· ",
-                             VERDE if hecho else TENUE)
+                if i < len(trabajo.orden):
+                    # recién escrita salpica espuma y se asienta en su color
+                    u = (t - trabajo.orden_t[i]) / 0.9 if i < len(trabajo.orden_t) else 1
+                    if u < 1:
+                        _anima()
+                        tinta = (mezclar(195, TEMA_256[ESPUMA][0], frenada(u)),)
+                    else:
+                        tinta = ESPUMA
+                    x = escribir(win, y, x, f"{i + 1:02d}", tinta, u < 0.5) + 1
+                elif i == len(trabajo.orden) and activo:
+                    x = escribir(win, y, x, f"{i + 1:02d}", respiro(t, CIELOS, 1.2)) + 1
+                else:
+                    x = escribir(win, y, x, "··", LINEA) + 1
             if trabajo.orden_ok is False:
                 escribir(win, y + 1, 12, f"{AVISO} el orden físico no quedó como se "
-                                         f"esperaba; hará falta --rehacer", AMARILLO)
+                                         f"esperaba; hará falta --rehacer", ARENA)
             y += 2
 
         y += 1
         alto_log = y0 + alto - y
         if alto_log > 0:
-            escribir(win, y - 1, 2, "─" * max(0, ancho - 4), TENUE)
+            escribir(win, y - 1, 2, VACIO * max(0, ancho - 4), LINEA)
             lineas = list(trabajo.lineas)[-alto_log:]
             for i, linea in enumerate(lineas):
                 tinta = TENUE
                 if linea.strip().startswith(MAL):
-                    tinta = ROJO
+                    tinta = CORAL
                 elif linea.strip().startswith(AVISO):
-                    tinta = AMARILLO
+                    tinta = ARENA
                 elif linea.strip().startswith(OK):
-                    tinta = VERDE
+                    tinta = ESPUMA
                 elif linea.strip().startswith("▸"):
                     tinta = BLANCO
                 escribir(win, y + i, 2, elipsis(linea, ancho - 4), tinta)
@@ -2009,13 +2518,13 @@ class VistaFiio(Vista):
             texto = (f"{resumen.get('copiados', 0)} álbumes, "
                      f"{resumen.get('archivos', 0)} archivos, "
                      f"{comun.formato_bytes(resumen.get('bytes', 0))}")
-            escribir(win, y0 + alto - 1, 2, elipsis(texto, ancho - 4), VERDE)
+            escribir(win, y0 + alto - 1, 2, elipsis(texto, ancho - 4), ESPUMA)
 
     def tecla(self, app, k):
         if app.trabajo.activo:
             if k == "x":
                 app.trabajo.cancelar.set()
-                app.avisar("abortando tras la pista en curso…", AMARILLO)
+                app.avisar("abortando tras la pista en curso…", ARENA)
                 return True
             return False
 
@@ -2044,15 +2553,15 @@ class VistaFiio(Vista):
     def _pedir_copia(self, app, rehacer):
         destino = self.montaje(app)
         if destino is None:
-            app.avisar("no hay ninguna tarjeta montada", ROJO)
+            app.avisar("no hay ninguna tarjeta montada", CORAL)
             return
         if not self.plan:
-            app.avisar("no hay nada que copiar", AMARILLO)
+            app.avisar("no hay nada que copiar", ARENA)
             return
         bytes_plan = sum(a["bytes"] for a in self.plan)
         if bytes_plan > destino["libre"]:
             app.avisar(f"no cabe: faltan "
-                       f"{comun.formato_bytes(bytes_plan - destino['libre'])}", ROJO)
+                       f"{comun.formato_bytes(bytes_plan - destino['libre'])}", CORAL)
             return
         pregunta = (f"¿Copiar {len(self.plan)} álbumes "
                     f"({comun.formato_bytes(bytes_plan)}) a {destino['montaje']}?")
@@ -2067,9 +2576,9 @@ class VistaLog(Vista):
     nombre = "Log"
 
     ETIQUETAS = {
-        "candidato": VIOLETA, "descargar": AMBAR, "archivo": TENUE,
-        "listo": VERDE, "buscar": AZUL, "cola": AZUL, "plugin": VIOLETA,
-        "reintento": AMARILLO, "error": ROJO, "descartado": TENUE,
+        "candidato": LILA, "descargar": AGUA, "archivo": TENUE,
+        "listo": ESPUMA, "buscar": CIELO, "cola": CIELO, "plugin": LILA,
+        "reintento": ARENA, "error": CORAL, "descartado": TENUE,
     }
     PATRON = PATRON_LOG
 
@@ -2101,14 +2610,22 @@ class VistaLog(Vista):
             self.desplazado = max(0, len(lineas) - alto)
         self.desplazado = max(0, min(self.desplazado, max(0, len(lineas) - alto)))
 
+        # Lo recién llegado entra brillando y se asienta en su color.
+        cuantas, cuando = app.datos.log_nuevas
+        brillo_ = 0.0
+        if not self.filtro and cuantas:
+            brillo_ = 1 - suave((time.monotonic() - cuando) / 1.8)
+            if brillo_ > 0:
+                _anima()
+        primera_nueva = len(lineas) - cuantas
         for i in range(alto):
             indice = self.desplazado + i
             if indice >= len(lineas):
                 break
-            self._linea(win, y0 + i, ancho, lineas[indice],
-                        indice == len(lineas) - 1)
+            self._linea(win, y0 + i, ancho, lineas[indice], indice == len(lineas) - 1,
+                        brillo_ if indice >= primera_nueva else 0.0)
 
-    def _linea(self, win, y, ancho, linea, ultima):
+    def _linea(self, win, y, ancho, linea, ultima, brillo_=0.0):
         coincide = self.PATRON.match(linea)
         if not coincide:
             escribir(win, y, 1, elipsis(linea, ancho - 2), TENUE)
@@ -2116,10 +2633,14 @@ class VistaLog(Vista):
         marca, etiqueta, resto = coincide.groups()
         escribir(win, y, 1, marca[11:19] if len(marca) > 18 else marca, TENUE)
         x = 11
-        escribir(win, y, x, rellenar(f"[{etiqueta}]", 12),
-                 self.ETIQUETAS.get(etiqueta, NORMAL))
-        escribir(win, y, x + 13, elipsis(resto, ancho - x - 14),
-                 BLANCO if ultima else NORMAL)
+        tono = self.ETIQUETAS.get((etiqueta.split() or [""])[0], NORMAL)
+        texto = BLANCO if ultima else NORMAL
+        if brillo_ > 0 and _PALETA["colores"] >= 256:
+            tono = (mezclar(_PALETA["tema"][tono][0] if tono != NORMAL else TINTA_TERMINAL,
+                            195, brillo_),)
+            texto = (mezclar(TINTA_TERMINAL, 195, brillo_),)
+        escribir(win, y, x, rellenar(etiqueta, 11), tono)
+        escribir(win, y, x + 12, elipsis(resto, ancho - x - 13), texto)
 
     def tecla(self, app, k):
         if k == curses.KEY_UP:
@@ -2275,6 +2796,9 @@ class VistaSalud(Vista):
 
     def dibujar(self, app, y0, alto, ancho):
         win = app.pantalla
+        if self.revisando and not self.resultados:
+            espera(win, y0, alto, ancho, "revisando la instalación…")
+            return
         y = y0
         for marca, texto, detalle, _accion in self.resultados:
             if y >= y0 + alto:
@@ -2283,20 +2807,21 @@ class VistaSalud(Vista):
                 if y > y0:
                     y += 1
                 if y < y0 + alto:
-                    escribir(win, y, 1, "▸ " + texto, AMBAR, True)
+                    x = escribir(win, y, 2, texto, BLANCO)
+                    escribir(win, y, x + 1, VACIO * max(0, ancho - x - 3), LINEA)
                     y += 1
                 continue
-            tinta = {OK: VERDE, MAL: ROJO, AVISO: AMARILLO}.get(marca, NORMAL)
+            tinta = {OK: ESPUMA, MAL: CORAL, AVISO: ARENA}.get(marca, NORMAL)
             escribir(win, y, 3, marca, tinta)
             escribir(win, y, 5, elipsis(texto, ancho - 6),
                      NORMAL if marca == OK else BLANCO)
             y += 1
             if detalle and y < y0 + alto:
                 escribir(win, y, 7, elipsis("↳ " + detalle, ancho - 8),
-                         TENUE if marca == OK else AMBAR)
+                         TENUE if marca == OK else CIELO)
                 y += 1
         if self.revisando and y < y0 + alto:
-            escribir(win, y + 1, 3, f"{girador()} comprobando…", AZUL)
+            escribir_trozos(win, y + 1, 3, cargando("comprobando…"))
 
     def tecla(self, app, k):
         if k == "R":
@@ -2327,7 +2852,10 @@ class Overlay:
 
 
 def _marco(app, alto, ancho, titulo, cola=""):
-    """Dibuja una ventana centrada y devuelve (y, x) de su interior."""
+    """Dibuja una ventana centrada y devuelve (y, x, alto, ancho) de su interior.
+
+    Es una tarjeta con su propio fondo y el borde redondeado; al abrirse, el
+    borde sube desde lo hondo hasta su azul mientras lo de detrás se hunde."""
     win = app.pantalla
     pantalla_alto, pantalla_ancho = win.getmaxyx()
     ancho = min(ancho, pantalla_ancho - 2)
@@ -2336,16 +2864,25 @@ def _marco(app, alto, ancho, titulo, cola=""):
     x0 = max(0, (pantalla_ancho - ancho) // 2)
 
     for y in range(y0, y0 + alto):
-        pintar(win, y, x0, ancho, NORMAL)
+        pintar(win, y, x0, ancho, VENTANA)
 
-    prefijo = "╭─ " + titulo + " "
-    sufijo = (" " + cola + " ─╮") if cola else "╮"
-    relleno = max(0, ancho - len(prefijo) - len(sufijo))
-    escribir(win, y0, x0, (prefijo + "─" * relleno + sufijo)[:ancho], AMBAR)
+    u = frenada((time.monotonic() - app._overlay_desde) / 0.25)
+    if u < 1:
+        _anima()
+    borde = (rampa(OCEANO, 0.05 + 0.3 * u),)
+    sufijo = f" {cola} " if cola else ""
+    titulo = f" {elipsis(titulo, max(1, ancho - 8 - len(sufijo)))} "
+    relleno = max(0, ancho - 4 - len(titulo) - len(sufijo))
+    x = escribir(win, y0, x0, "╭─", borde)
+    x = escribir(win, y0, x, titulo, (rampa(OCEANO, 0.3 + 0.4 * u),), True)
+    x = escribir(win, y0, x, VACIO * relleno, borde)
+    if sufijo:
+        x = escribir(win, y0, x, sufijo, TENUE)
+    escribir(win, y0, x, "─╮", borde)
     for y in range(y0 + 1, y0 + alto - 1):
-        escribir(win, y, x0, "│", AMBAR)
-        escribir(win, y, x0 + ancho - 1, "│", AMBAR)
-    escribir(win, y0 + alto - 1, x0, "╰" + "─" * (ancho - 2) + "╯", AMBAR)
+        escribir(win, y, x0, "│", borde)
+        escribir(win, y, x0 + ancho - 1, "│", borde)
+    escribir(win, y0 + alto - 1, x0, "╰" + VACIO * (ancho - 2) + "╯", borde)
     return y0 + 1, x0 + 2, alto - 2, ancho - 4
 
 
@@ -2360,11 +2897,10 @@ class OverlayPedir(Overlay):
         y, x, _alto, ancho = _marco(app, 9, 66, "pedir")
         win = app.pantalla
         escribir(win, y, x, "qué buscar", TENUE)
-        escribir(win, y + 1, x, "▸", AMBAR)
+        escribir(win, y + 1, x, "▸", AGUA)
         campo = elipsis(self.texto, ancho - 3)
         escribir(win, y + 1, x + 2, campo, BLANCO)
-        if int(time.monotonic() * 2) % 2:
-            escribir(win, y + 1, x + 2 + len(campo), BLOQUE, AMBAR)
+        escribir(win, y + 1, x + 2 + len(campo), *caret())
         escribir(win, y + 2, x, "«Artista - Álbum» funciona mejor que un título suelto",
                  TENUE, ancho=ancho)
 
@@ -2373,7 +2909,7 @@ class OverlayPedir(Overlay):
         escribir(win, y + 4, x + 17, " canción ", INV if self.cancion else NORMAL)
         escribir(win, y + 4, x + 30, "⇥ cambia", TENUE)
 
-        escribir(win, y + 6, x, "↵ encolar", AMBAR)
+        escribir(win, y + 6, x, "↵ encolar", AGUA)
         escribir(win, y + 6, x + 12, "esc cancelar", TENUE)
 
     def tecla(self, app, k):
@@ -2429,7 +2965,7 @@ class OverlayImportar(Overlay):
         y, x, alto, ancho = _marco(app, max(min(n, 12) + 5, 8), 78, "importar playlist")
         if not self.archivos:
             escribir(win, y, x, "No encontré ningún .csv en Descargas, Música, Documentos "
-                                "ni el escritorio.", AMARILLO, ancho=ancho)
+                                "ni el escritorio.", ARENA, ancho=ancho)
             escribir(win, y + 2, x, "Exporta la playlist con Exportify o TuneMyMusic y "
                                     "guarda el CSV en una de esas carpetas.", TENUE, ancho=ancho)
             escribir(win, y + 4, x, "esc cerrar", TENUE)
@@ -2448,13 +2984,14 @@ class OverlayImportar(Overlay):
             tinta = SEL if elegido else None
             if elegido:
                 pintar(win, fila, x - 1, ancho + 2, SEL)
+                escribir(win, fila, x - 1, "▎", AGUA)
             carpeta = os.path.dirname(ruta).replace(casa, "~")
             cuando = desde(datetime.fromtimestamp(mtime).isoformat())
             escribir(win, fila, x, elipsis(os.path.basename(ruta), ancho - 34),
                      tinta or BLANCO)
             escribir(win, fila, x + ancho - 32, rellenar(carpeta, 20), tinta or TENUE)
             escribir(win, fila, x + ancho - len(cuando), cuando, tinta or TENUE)
-        escribir(win, y + alto - 1, x, "↵ ver qué se pediría", AMBAR)
+        escribir(win, y + alto - 1, x, "↵ ver qué se pediría", AGUA)
         escribir(win, y + alto - 1, x + 22, "esc cancelar", TENUE)
 
     def _resumen(self, app):
@@ -2462,7 +2999,7 @@ class OverlayImportar(Overlay):
         p = self.plan
         if p is None:
             y, x, alto, ancho = _marco(app, 7, 78, "importar playlist")
-            escribir(win, y, x, elipsis(self.error, ancho), ROJO)
+            escribir(win, y, x, elipsis(self.error, ancho), CORAL)
             escribir(win, y + 2, x, "Hacen falta columnas de artista y título, como las que "
                                     "exportan Exportify o TuneMyMusic.", TENUE, ancho=ancho)
             escribir(win, y + 4, x, "esc volver", TENUE)
@@ -2489,7 +3026,7 @@ class OverlayImportar(Overlay):
                                 f"ya en la cola", TENUE)
             y += 1
         for aviso in avisos:
-            escribir(win, y, x, elipsis(f"{AVISO} {aviso}", ancho), AMARILLO)
+            escribir(win, y, x, elipsis(f"{AVISO} {aviso}", ancho), ARENA)
             y += 1
         y += 1
         if pedir:
@@ -2507,17 +3044,17 @@ class OverlayImportar(Overlay):
                                                     f"{e['consulta']}", ancho - 2), NORMAL)
         else:
             escribir(win, y, x, "Nada que pedir: todo está ya en la biblioteca o en la cola.",
-                     AMARILLO, ancho=ancho)
+                     ARENA, ancho=ancho)
 
         escribir(win, fondo - 2, x, "pedir", TENUE)
         escribir(win, fondo - 2, x + 7, " canciones ", NORMAL if self.albumes else INV)
         escribir(win, fondo - 2, x + 19, " álbumes ", INV if self.albumes else NORMAL)
         escribir(win, fondo - 2, x + 30, "⇥ cambia", TENUE)
-        escribir(win, fondo - 2, x + 41, "r", AMBAR, True)
+        escribir(win, fondo - 2, x + 41, "r", AGUA, True)
         escribir(win, fondo - 2, x + 43, "con lo que ya tienes: "
                                          + ("sí" if self.repetir else "no"), TENUE)
         if pedir:
-            escribir(win, fondo - 1, x, f"↵ encolar {len(pedir)} {que}", AMBAR)
+            escribir(win, fondo - 1, x, f"↵ encolar {len(pedir)} {que}", AGUA)
             escribir(win, fondo - 1, x + 12 + len(str(len(pedir))) + len(que) + 2,
                      "esc volver", TENUE)
         else:
@@ -2555,15 +3092,15 @@ class OverlayImportar(Overlay):
         p = self.plan
         app.cerrar_overlay()
         if not p["pedir"]:
-            app.avisar("nada que pedir de esa lista", AMARILLO)
+            app.avisar("nada que pedir de esa lista", ARENA)
             return
         creadas = listas.encolar(p)
         que = "álbumes" if p["tipo"] == "album" else "canciones"
         app.avisar(f"encoladas {len(creadas)} {que} de «{p['nombre']}» · "
-                   f"{listas.estimacion(len(creadas), p['tipo'] == 'album')}", VERDE, 6)
+                   f"{listas.estimacion(len(creadas), p['tipo'] == 'album')}", ESPUMA, 6)
         if creadas and not app.datos.nicotine_vivo():
             app.avisar("encoladas, pero Nicotine+ está cerrado: la cola no avanza",
-                       AMARILLO, 6)
+                       ARENA, 6)
         app.ir_a(0)
 
 
@@ -2577,11 +3114,10 @@ class OverlayBuscar(Overlay):
     def dibujar(self, app):
         y, x, _alto, ancho = _marco(app, 5, 56, "buscar")
         win = app.pantalla
-        escribir(win, y, x, "/", AMBAR)
+        escribir(win, y, x, "/", AGUA)
         campo = elipsis(self.texto, ancho - 3)
         escribir(win, y, x + 2, campo, BLANCO)
-        if int(time.monotonic() * 2) % 2:
-            escribir(win, y, x + 2 + len(campo), BLOQUE, AMBAR)
+        escribir(win, y, x + 2 + len(campo), *caret())
         escribir(win, y + 2, x, "↵ aplicar    esc quitar el filtro", TENUE)
 
     def tecla(self, app, k):
@@ -2618,9 +3154,9 @@ class OverlayConfirmar(Overlay):
         lineas.append(linea)
         for i, texto in enumerate(lineas[:3]):
             escribir(win, y + i, x, texto, BLANCO)
-        escribir(win, y + 4, x, "s", VERDE, True)
+        escribir(win, y + 4, x, "s", ESPUMA, True)
         escribir(win, y + 4, x + 2, "sí", NORMAL)
-        escribir(win, y + 4, x + 8, "n", ROJO, True)
+        escribir(win, y + 4, x + 8, "n", CORAL, True)
         escribir(win, y + 4, x + 10, "no  ·  esc cancela", TENUE)
 
     def tecla(self, app, k):
@@ -2650,7 +3186,7 @@ class OverlayAyuda(Overlay):
             if i >= alto:
                 break
             if not tecla:
-                escribir(win, y + i, x, texto, AMBAR, True)
+                escribir(win, y + i, x, texto, AGUA, True)
             else:
                 escribir(win, y + i, x + 2, rellenar(tecla, 12), BLANCO)
                 escribir(win, y + i, x + 14, elipsis(texto, ancho - 15), TENUE)
@@ -2676,14 +3212,13 @@ class OverlayPaleta(Overlay):
         opciones = self.opciones(app)
         y, x, alto, ancho = _marco(app, min(18, max(6, len(opciones) + 4)), 66, "orden")
         win = app.pantalla
-        escribir(win, y, x, ":", AMBAR)
+        escribir(win, y, x, ":", AGUA)
         campo = elipsis(self.texto, ancho - 12)
         escribir(win, y, x + 2, campo, BLANCO)
-        if int(time.monotonic() * 2) % 2:
-            escribir(win, y, x + 2 + len(campo), BLOQUE, AMBAR)
+        escribir(win, y, x + 2 + len(campo), *caret())
         cola = f"{len(opciones)} de {len(app.ordenes())}"
         escribir(win, y, x + ancho - len(cola), cola, TENUE)
-        escribir(win, y + 1, x, "─" * ancho, TENUE)
+        escribir(win, y + 1, x, VACIO * ancho, LINEA)
 
         self.cursor = max(0, min(self.cursor, max(0, len(opciones) - 1)))
         sitio = alto - 2
@@ -2698,11 +3233,12 @@ class OverlayPaleta(Overlay):
             fila = y + 2 + i
             if elegido:
                 pintar(win, fila, x - 1, ancho + 2, SEL)
+                escribir(win, fila, x - 1, "▎", AGUA)
             escribir(win, fila, x, elipsis(nombre, ancho - 8),
                      SEL if elegido else NORMAL)
             if atajo:
                 escribir(win, fila, x + ancho - len(atajo), atajo,
-                         SEL if elegido else AMBAR)
+                         SEL if elegido else AGUA)
 
     def tecla(self, app, k):
         opciones = self.opciones(app)
@@ -2743,6 +3279,11 @@ class App:
         self._aviso_color = NORMAL
         self._aviso_desde = 0.0
         self._aviso_hasta = 0.0
+        self._overlay_desde = 0.0
+        self._animando = True
+        self._sub_objetivo = None
+        self._sub_desde = self._sub_actual = (0.0, 0.0)
+        self._sub_t0 = 0.0
         self.salir = False
 
     # ── ciclo de vida ──
@@ -2764,6 +3305,8 @@ class App:
         self.vista().entrar(self)
 
     def abrir(self, overlay):
+        if self.overlay is None:
+            self._overlay_desde = time.monotonic()
         self.overlay = overlay
 
     def cerrar_overlay(self):
@@ -2779,19 +3322,19 @@ class App:
     def pedir(self, consultas, cancion=False):
         creadas = comun.añadir_peticiones(consultas, tipo="cancion" if cancion else "album")
         if not creadas:
-            self.avisar("ya estaba en la cola", AMARILLO)
+            self.avisar("ya estaba en la cola", ARENA)
             return
-        self.avisar(f"encolado {creadas[0]['consulta']}", VERDE)
+        self.avisar(f"encolado {creadas[0]['consulta']}", ESPUMA)
         if not self.datos.nicotine_vivo():
             self.avisar("encolado, pero Nicotine+ está cerrado: la cola no avanza",
-                        AMARILLO, 6)
+                        ARENA, 6)
         self.ir_a(0)
 
     def cancelar_peticion(self, pet):
         if pet is None:
             return
         if pet["estado"] not in comun.ACTIVOS:
-            self.avisar("esa petición ya terminó", AMARILLO)
+            self.avisar("esa petición ya terminó", ARENA)
             return
 
         def _op(cola):
@@ -2803,7 +3346,7 @@ class App:
 
         comun.modificar_cola(_op)
         comun.registrar(f"[cancelada] {pet['id']}")
-        self.avisar(f"cancelada {pet['consulta']}", AMARILLO)
+        self.avisar(f"cancelada {pet['consulta']}", ARENA)
 
     def limpiar_cola(self):
         def _op(cola):
@@ -2813,11 +3356,11 @@ class App:
             return antes - len(cola["peticiones"])
 
         quitadas = comun.modificar_cola(_op)
-        self.avisar(f"{quitadas} petición(es) fuera de la cola", VERDE)
+        self.avisar(f"{quitadas} petición(es) fuera de la cola", ESPUMA)
 
     def organizar(self):
         if self.trabajo.activo:
-            self.avisar("ya hay una tarea en curso", AMARILLO)
+            self.avisar("ya hay una tarea en curso", ARENA)
             return
         carpetas = list(self.datos.sobras)
         sueltos = list(self.datos.sueltos)
@@ -2851,7 +3394,7 @@ class App:
 
     def pasar_a_heredada(self, albumes):
         if self.trabajo.activo:
-            self.avisar("ya hay una tarea en curso", AMARILLO)
+            self.avisar("ya hay una tarea en curso", ARENA)
             return
 
         def tarea(trabajo):
@@ -2862,12 +3405,12 @@ class App:
             self.biblioteca.cargar()
             if resumen["errores"]:
                 self.avisar(f"{len(resumen['errores'])} error(es) al mover; "
-                            f"mira la Cola", ROJO, 6)
+                            f"mira la Cola", CORAL, 6)
             elif resumen["omitidos"]:
                 self.avisar(f"{resumen['copiados']} movido(s), {resumen['omitidos']} "
-                            f"ya estaban en la heredada", AMARILLO, 6)
+                            f"ya estaban en la heredada", ARENA, 6)
             else:
-                self.avisar(f"{resumen['copiados']} álbum(es) en la heredada", VERDE)
+                self.avisar(f"{resumen['copiados']} álbum(es) en la heredada", ESPUMA)
             return resumen
 
         self.trabajo.lanzar("pasando a la heredada", tarea, clase="organizar")
@@ -2900,10 +3443,10 @@ class App:
 
     def copiar_fiio(self, destino, plan, simular=False, rehacer=False):
         if destino is None or not plan:
-            self.avisar("no hay tarjeta o no hay nada que copiar", AMARILLO)
+            self.avisar("no hay tarjeta o no hay nada que copiar", ARENA)
             return
         if self.trabajo.activo:
-            self.avisar("ya hay una tarea en curso", AMARILLO)
+            self.avisar("ya hay una tarea en curso", ARENA)
             return
         raiz_destino = os.path.join(destino["montaje"], fiio.DESTINO_REL_POR_DEFECTO)
         albumes = list(plan)
@@ -2924,12 +3467,12 @@ class App:
 
     def expulsar(self, destino):
         if destino is None:
-            self.avisar("no hay ninguna tarjeta montada", AMARILLO)
+            self.avisar("no hay ninguna tarjeta montada", ARENA)
             return
         if self.trabajo.activo:
-            self.avisar("espera a que termine la copia", AMARILLO)
+            self.avisar("espera a que termine la copia", ARENA)
             return
-        self.avisar("sincronizando y expulsando…", AZUL, 8)
+        self.avisar("sincronizando y expulsando…", CIELO, 8)
 
         def tarea(trabajo):
             fiio.desmontar(destino["montaje"], informar=trabajo.registrar)
@@ -2943,9 +3486,9 @@ class App:
             return
         ok, detalle = comun.lanzar_nicotine()
         if ok:
-            self.avisar("abriendo Nicotine+…", VERDE)
+            self.avisar("abriendo Nicotine+…", ESPUMA)
         else:
-            self.avisar(f"no pude abrirlo: {detalle}", ROJO)
+            self.avisar(f"no pude abrirlo: {detalle}", CORAL)
 
     def abrir_log(self):
         if comun.ES_WINDOWS:
@@ -2953,7 +3496,7 @@ class App:
             try:
                 os.startfile(comun.ARCHIVO_LOG)
             except OSError as error:
-                self.avisar(f"no pude abrir el log: {error}", ROJO)
+                self.avisar(f"no pude abrir el log: {error}", CORAL)
             return
         editor = os.environ.get("EDITOR") or "nano"
         try:
@@ -2961,7 +3504,7 @@ class App:
             curses.endwin()
             subprocess.call([editor, comun.ARCHIVO_LOG])
         except OSError as error:
-            self.avisar(f"no pude abrir {editor}: {error}", ROJO)
+            self.avisar(f"no pude abrir {editor}: {error}", CORAL)
         finally:
             curses.reset_prog_mode()
             self.pantalla.clear()
@@ -3008,7 +3551,7 @@ class App:
     def bucle(self):
         # `timeout` y no `nodelay`: sin espera, ncurses devuelve las flechas
         # troceadas (ESC, '[', 'B') en vez de KEY_DOWN y no se reconocen.
-        self.pantalla.timeout(25)
+        self.pantalla.timeout(15)
         self.pantalla.keypad(True)
         try:
             curses.curs_set(0)
@@ -3017,12 +3560,16 @@ class App:
         ultimo = 0.0
         while not self.salir:
             k = self._tecla()
-            if k is not None:
+            pulsada = k is not None
+            if pulsada:
                 self.procesar(k)
                 if self.salir:
                     return
+            # 30 cuadros por segundo mientras algo se mueve; si no, 4 bastan
+            # para el reloj y lo que llegue del sondeo. Una tecla repinta ya.
             ahora = time.monotonic()
-            if ahora - ultimo >= 1 / 15:
+            intervalo = 1 / 30 if self._animando else 1 / 4
+            if pulsada or ahora - ultimo >= intervalo:
                 ultimo = ahora
                 try:
                     self.dibujar()
@@ -3077,57 +3624,89 @@ class App:
     def dibujar(self):
         win = self.pantalla
         alto, ancho = win.getmaxyx()
-        win.erase()
+        LIENZO.preparar(alto, ancho)
+        RITMO["animando"] = False
         if alto < 12 or ancho < 46:
-            escribir(win, 0, 0, "La ventana es demasiado pequeña.", AMARILLO)
+            escribir(win, 0, 0, "La ventana es demasiado pequeña.", ARENA)
             escribir(win, 1, 0, f"Hacen falta 46x12; hay {ancho}x{alto}.", TENUE)
-            win.refresh()
-            return
+        else:
+            self._eventos()
+            self._cabecera(ancho)
+            self._pestanas(ancho)
+            escribir(win, alto - 3, 0, VACIO * ancho, LINEA)
 
-        self._cabecera(ancho)
-        self._pestanas(ancho)
-        escribir(win, 2, 0, "─" * ancho, TENUE)
-        escribir(win, alto - 3, 0, "─" * ancho, TENUE)
-        self._eventos()
+            cuerpo_y = 3
+            cuerpo_alto = alto - 6
+            self.vista().dibujar(self, cuerpo_y, cuerpo_alto, ancho)
 
-        cuerpo_y = 3
-        cuerpo_alto = alto - 6
-        self.vista().dibujar(self, cuerpo_y, cuerpo_alto, ancho)
+            self._estado(alto - 2, ancho)
+            self._teclas(alto - 1, ancho)
 
-        self._estado(alto - 2, ancho)
-        self._teclas(alto - 1, ancho)
-
-        if self.overlay is not None:
-            self.overlay.dibujar(self)
+            if self.overlay is not None:
+                # lo de detrás se hunde mientras la ventana sube
+                u = frenada((time.monotonic() - self._overlay_desde) / 0.2)
+                if u < 1:
+                    _anima()
+                # en tres pasos: cada paso intermedio gasta pares de color
+                LIENZO.atenuar(0.2 * math.ceil(3 * u))
+                self.overlay.dibujar(self)
+        LIENZO.volcar(win)
         win.refresh()
+        self._animando = RITMO["animando"]
+
+    def _activo(self):
+        """Algo está pasando de verdad: una descarga, una copia, una tarea."""
+        pet = self.datos.peticion_en_curso()
+        return self.trabajo.activo or (pet is not None
+                                       and pet["estado"] == comun.DESCARGANDO)
 
     def _cabecera(self, ancho):
         win = self.pantalla
-        escribir(win, 0, 1, "flacpipe", AMBAR, True)
+        t = time.monotonic()
+        # La marca es agua: quieta en reposo, y fluye mientras algo se mueve.
+        fluye = self._activo()
+        if fluye:
+            _anima()
+        x = 1
+        for i, letra in enumerate("flacpipe"):
+            if fluye:
+                ola_ = 0.5 + 0.5 * math.sin(2 * math.pi * (i / 9 - t / 2.2))
+                tono = rampa(OCEANO, 0.42 + 0.5 * ola_)
+            else:
+                tono = rampa(OCEANO, 0.48 + 0.42 * i / 7)
+            x = escribir(win, 0, x, letra, (tono,), True)
+
         pet = self.datos.peticion_en_curso()
         if pet is not None:
-            escribir(win, 0, 10, girador(), AZUL)
-            escribir(win, 0, 12, elipsis(pet["consulta"], max(0, ancho - 46)), TENUE)
+            glifo, color = glifo_estado(pet["estado"], t)
+            escribir(win, 0, x + 2, glifo, color)
+            escribir(win, 0, x + 4, elipsis(pet["consulta"], max(0, ancho - 50)), TENUE)
 
-        derecha = []
-        derecha.append(("nicotine+ ●" if self.datos.nicotine_vivo() else "nicotine+ ○",
-                        VERDE if self.datos.nicotine_vivo() else TENUE))
+        partes = []
+        vivo = self.datos.nicotine_vivo()
+        partes.append(("nicotine+", "●" if vivo else "○", ESPUMA if vivo else TENUE))
         destinos = self.datos.destinos
-        derecha.append((f"{destinos[0]['etiqueta']} ●" if destinos else "tarjeta ○",
-                        VERDE if destinos else TENUE))
-        derecha.append((time.strftime("%H:%M"), TENUE))
-
-        x = ancho - sum(len(t) + 3 for t, _c in derecha) - 1
-        for texto, color in derecha:
-            x = escribir(win, 0, x, texto, color) + 3
+        partes.append((destinos[0]["etiqueta"] if destinos else "tarjeta",
+                       "●" if destinos else "○", ESPUMA if destinos else TENUE))
+        reloj = time.strftime("%H:%M")
+        largo = sum(len(n) + 2 for n, _p, _c in partes) + 3 * len(partes) + len(reloj)
+        x = ancho - largo - 1
+        for nombre, punto, color in partes:
+            x = escribir(win, 0, x, nombre, TENUE)
+            x = escribir(win, 0, x + 1, punto, color) + 3
+        escribir(win, 0, x, reloj, TENUE)
 
     def _pestanas(self, ancho):
         win = self.pantalla
         x = 1
+        posiciones = []
         for i, vista in enumerate(self.vistas):
-            etiqueta = f" {i + 1} {vista.nombre} "
-            x = escribir(win, 1, x, etiqueta, INV if i == self.actual else TENUE)
-            x += 1
+            elegida = i == self.actual
+            inicio = x
+            x = escribir(win, 1, x, f"{i + 1}", AGUA if elegida else (25,), elegida)
+            x = escribir(win, 1, x + 1, vista.nombre, BLANCO if elegida else TENUE)
+            posiciones.append((inicio, x - inicio))
+            x += 3
         cola = []
         resumen = self.vista().resumen(self)
         if resumen:
@@ -3141,7 +3720,47 @@ class App:
             cola.append(f"{len(self.datos.sobras) + len(self.datos.sueltos)} sin organizar")
         texto = "  ·  ".join(cola)
         if texto:
-            escribir(win, 1, max(x + 2, ancho - len(texto) - 1), texto, TENUE)
+            escribir(win, 1, max(x + 1, ancho - len(texto) - 1),
+                     elipsis(texto, max(0, ancho - x - 2)), TENUE)
+        self._subrayado(2, ancho, *posiciones[self.actual])
+
+    def _subrayado(self, y, ancho, x_obj, w_obj):
+        """La raya bajo la pestaña activa. Al cambiar de pestaña se desliza
+        hasta la nueva y frena al llegar; a medio camino usa medias celdas
+        (╺ ╸) para que el movimiento no vaya a saltos."""
+        win = self.pantalla
+        ahora = time.monotonic()
+        objetivo = (float(x_obj - 1), float(w_obj + 2))
+        if self._sub_objetivo is None:
+            self._sub_objetivo = self._sub_desde = objetivo
+            self._sub_t0 = ahora - 1
+        elif objetivo != self._sub_objetivo:
+            self._sub_desde = self._sub_actual
+            self._sub_objetivo = objetivo
+            self._sub_t0 = ahora
+        u = (ahora - self._sub_t0) / 0.26
+        if u < 1:
+            _anima()
+        k = frenada(u)
+        x0 = self._sub_desde[0] + (objetivo[0] - self._sub_desde[0]) * k
+        w = self._sub_desde[1] + (objetivo[1] - self._sub_desde[1]) * k
+        self._sub_actual = (x0, w)
+
+        escribir(win, y, 0, VACIO * ancho, LINEA)
+        izq, der = x0, x0 + w
+        for cx in range(max(0, int(izq)), min(ancho, int(math.ceil(der)))):
+            cubre_izq = max(izq, cx) - cx          # de 0 a 1 dentro de la celda
+            cubre_der = min(der, cx + 1) - cx
+            if cubre_der - cubre_izq < 0.25:
+                continue
+            if cubre_izq >= 0.5:
+                glifo = "╺"
+            elif cubre_der <= 0.5:
+                glifo = "╸"
+            else:
+                glifo = "━"
+            tono = rampa(OCEANO, 0.55 + 0.4 * (cx - izq) / max(1.0, w))
+            escribir(win, y, cx, glifo, (tono,))
 
     def _eventos(self):
         """Avisos automáticos cuando una petición cambia de estado."""
@@ -3151,67 +3770,80 @@ class App:
             if estado == comun.LISTO:
                 r = p.get("resultado") or {}
                 self.avisar(f"{OK} {p['consulta']} · {r.get('pistas', '?')} pistas · "
-                            f"{r.get('calidad', '')}", VERDE, 6)
+                            f"{r.get('calidad', '')}", ESPUMA, 6)
             elif estado == comun.FALLIDO:
-                self.avisar(f"{MAL} {p['consulta']} · {p.get('mensaje') or 'falló'}", ROJO, 8)
+                self.avisar(f"{MAL} {p['consulta']} · {p.get('mensaje') or 'falló'}", CORAL, 8)
             elif estado == comun.DESCARGANDO:
                 c = p.get("candidato") or {}
                 self.avisar(f"↓ {p['consulta']} · de {c.get('usuario', '?')} · "
-                            f"{c.get('detalle', '')}", AMBAR, 5)
+                            f"{c.get('detalle', '')}", AGUA, 5)
             elif estado == comun.PENDIENTE and (p.get("mensaje") or "").startswith("reintentando"):
-                self.avisar(f"{AVISO} {p['consulta']} · {p['mensaje']}", AMARILLO, 6)
+                self.avisar(f"{AVISO} {p['consulta']} · {p['mensaje']}", ARENA, 6)
 
     def _estado(self, y, ancho):
         self._estado_base(y, ancho)
         self._aviso_animado(y, ancho)
 
     def _aviso_animado(self, y, ancho):
-        """El aviso entra por la derecha, se queda y se va por donde vino."""
+        """El aviso es una tarjeta con el filo de su color: entra deslizándose
+        por la derecha, frena al llegar, se queda y se va por donde vino."""
         t = time.monotonic()
         if not self._aviso or t >= self._aviso_hasta:
             return
-        texto = elipsis(f" {self._aviso} ", max(4, ancho - 2))
-        largo = len(texto)
-        entrada = salida = 0.4
+        _anima()
+        texto = elipsis(f" {self._aviso}  ", max(4, ancho - 4))
+        largo = len(texto) + 1
+        entrada = salida = 0.35
         desde_inicio = t - self._aviso_desde
         hasta_fin = self._aviso_hasta - t
         if desde_inicio < entrada:
-            fuera = int((1 - desde_inicio / entrada) ** 2 * largo)
+            fuera = (1 - frenada(desde_inicio / entrada)) * largo
         elif hasta_fin < salida:
-            fuera = int((1 - hasta_fin / salida) ** 2 * largo)
+            fuera = (1 - frenada(hasta_fin / salida)) * largo
         else:
             fuera = 0
-        escribir(self.pantalla, y, ancho - 1 - largo + fuera, texto,
-                 FONDO_DE.get(self._aviso_color, SEL), True)
+        x = ancho - 1 - largo + int(fuera + 0.5)
+        color = self._aviso_color if self._aviso_color != NORMAL else AGUA
+        frente = _PALETA["tema"].get(color, (-1, None, 0))[0]
+        if _PALETA["colores"] >= 256:
+            pintar(self.pantalla, y, x, largo, VENTANA)
+            escribir(self.pantalla, y, x, "▌", color)
+            escribir(self.pantalla, y, x + 1, texto, (frente, FONDO_VENTANA))
+        else:
+            escribir(self.pantalla, y, x, "▌", color)
+            escribir(self.pantalla, y, x + 1, texto, color, True)
 
     def _estado_base(self, y, ancho):
         win = self.pantalla
+        t = time.monotonic()
         if self.reproductor.sonando:
             transcurrido = self.reproductor.transcurrido()
             total = self.reproductor.duracion
-            escribir(win, y, 1, "▶", VERDE)
+            escribir(win, y, 1, "▶", AGUA)
             escribir(win, y, 3, elipsis(self.reproductor.titulo, max(4, ancho - 34)),
                      BLANCO)
             x = max(5, ancho - 30)
             if total:
-                barra(win, y, x, 16, min(1.0, transcurrido / total), VERDE)
+                barra(win, y, x, 16, min(1.0, transcurrido / total), AGUA, vivo=True, t=t)
                 escribir(win, y, x + 17,
                          f"{duracion(transcurrido)}/{duracion(total)}", TENUE)
             else:
                 escribir(win, y, x, duracion(transcurrido), TENUE)
             return
         if self.trabajo.activo:
-            escribir(win, y, 1, girador(), AZUL)
+            escribir(win, y, 1, girador(t), CIELO)
             escribir(win, y, 3, elipsis(self.trabajo.titulo, ancho - 4), TENUE)
             return
         if self.datos.aviso:
-            escribir(win, y, 1, elipsis(self.datos.aviso, ancho - 2), ROJO)
+            escribir(win, y, 1, elipsis(self.datos.aviso, ancho - 2), CORAL)
             return
         pet = self.datos.peticion_en_curso()
         if pet is not None and pet["estado"] == comun.DESCARGANDO:
             velocidad = self.datos.velocimetro
-            escribir(win, y, 1, f"{comun.formato_bytes(velocidad.actual)}/s", BLANCO)
-            escribir(win, y, 14, chispa(velocidad.historial, min(30, ancho - 18)), AZUL)
+            texto = f"{comun.formato_bytes(velocidad.actual)}/s"
+            escribir(win, y, 1, texto, BLANCO)
+            escribir_trozos(win, y, 3 + len(texto),
+                            chispa(velocidad.historial, min(30, ancho - 20)))
             return
         escribir(win, y, 1, "todo en calma", TENUE)
 
@@ -3221,7 +3853,7 @@ class App:
         win = self.pantalla
 
         def par(x, tecla, texto):
-            x = escribir(win, y, x, tecla, AMBAR, True)
+            x = escribir(win, y, x, tecla, AGUA, True)
             return escribir(win, y, x + 1, texto, TENUE) + 2
 
         fijas = [("?", "ayuda"), ("q", "salir")]

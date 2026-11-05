@@ -145,11 +145,35 @@ ficha va a dos columnas cuando cabe y debajo aparecen las **pistas** del álbum
 subiendo), la **tabla de fuentes** que puntuó el plugin (la elegida, las
 descartadas y por cuántos puntos) y la **historia** de esa petición sacada de
 `pipeline.log`. Con la terminal muy ancha, pistas a un lado y fuentes e
-historia al otro; con poca altura se quedan sólo los campos que pesan. Todo lo
-que se mueve mide algo real: el medidor VU y la chispa salen de los bytes por
-segundo, la cuenta de la búsqueda son los 45 s que el plugin acumula
-resultados, y las peticiones en espera «respiran». Cuando un álbum termina, un
-aviso entra deslizándose por la derecha y la fila parpadea en verde.
+historia al otro; con poca altura se quedan sólo los campos que pesan.
+
+El tema es **acuático**: azules que van de lo hondo a la espuma para casi todo,
+y sólo tres tonos para lo que tiene que saltar a la vista: espuma (bien), coral
+(mal) y arena (ojo). **Todo lo que se mueve mide algo real**, y en reposo la
+pantalla se queda quieta:
+
+| qué se mueve | qué significa |
+|---|---|
+| burbujas que suben | algo está trabajando (leer la biblioteca, revisar, una copia) |
+| un sonar que se abre y se apaga | la petición está buscando fuentes |
+| gotas que caen | la petición está bajando |
+| un punto que respira | la petición espera turno |
+| un reflejo que recorre una barra | alguien la está llenando ahora mismo (bytes que llegan o se escriben) |
+| un pulso de luz por una línea fina | la pista en curso, cuyo tamaño final no se sabe |
+| el oleaje y la línea de agua junto a la velocidad | los bytes por segundo: suben, se aclaran o se quedan abajo y oscuros |
+| `flacpipe` fluyendo en la cabecera | hay una descarga o una copia en marcha |
+| un destello de espuma (o coral) que cruza una fila | esa petición acaba de terminar (o de fallar) |
+| un número de pista que salpica espuma | esa pista acaba de quedar escrita en la tarjeta |
+
+La cuenta de la búsqueda son los 45 s que el plugin acumula resultados. Al
+cambiar de pestaña, la raya de debajo se desliza hasta la nueva y frena al
+llegar; al abrir una ventana, lo de detrás se hunde. Los avisos entran
+deslizándose por la derecha como una tarjeta con el filo de su color.
+
+Mientras algo se mueve, la pantalla se repinta a 30 cuadros por segundo (pintar
+uno cuesta un par de milisegundos); si no, cuatro por segundo bastan para el
+reloj. Se dibuja con la paleta de 256 colores: en una terminal de 8 o 16
+colores se toma lo más parecido de los básicos, y sin color, negrita e inverso.
 
 La biblioteca **se relee sola** cuando el plugin organiza un álbum: cada pocos
 segundos se compara el mtime de la raíz y el de cada carpeta de artista, y si
@@ -447,17 +471,33 @@ las entradas de un directorio.
 | `flacpipe_tui.py` | La interfaz a pantalla completa (curses) |
 | `instalar.py` | Instalador para los tres sistemas; `instalar.sh` e `instalar.bat` sólo lo lanzan |
 | `pruebas/probar.py` | Banco de pruebas de la interfaz: la corre en un pty y captura la pantalla |
+| `pruebas/conductor.py` | Lo que corre dentro del pty: monta el escenario y vuelca cada cuadro |
+| `pruebas/render.py` | Pinta las capturas como PNG, hojas de cuadros o GIF (necesita Pillow) |
+| `pruebas/demo.py` | La interfaz en tu terminal con descargas y una tarjeta de mentira |
+| `pruebas/nombres.py` | Busca nombres sin definir: el `NameError` que sólo salta al pintar |
 
 La interfaz vive fuera de `flac_hunter/` a propósito: nunca la carga Nicotine+,
 sólo lee `cola.json` y `pipeline.log` con el mismo `flock` que todo lo demás, y
 lanza el trabajo pesado en un hilo. **El plugin no sabe que existe.**
 
 Para ver la interfaz sin abrirla, `python3 pruebas/probar.py` la lanza dentro
-de un pty en tres tamaños de terminal, le manda teclas y guarda capturas de
-texto (con un mapa de colores al lado) en `pruebas/salida/capturas/`. Con
-`real` usa tu cola de verdad, sólo lectura; con `falso` simula una descarga
-que avanza, una búsqueda, una espera y un álbum que termina; con `fiio`, una
-copia a una tarjeta inventada. No escribe nada en `~/Música`.
+de un pty en tres tamaños de terminal, le manda teclas y guarda capturas en
+`pruebas/salida/capturas/`: el texto y, al lado, un `.json` con el carácter, los
+colores y el estilo de cada celda tal como quedaron en el lienzo. Con `real` usa
+tu cola de verdad, sólo lectura; con `falso` simula una descarga que avanza, una
+búsqueda, una espera y un álbum que termina; con `fiio`, una copia a una tarjeta
+inventada; con `animar`, graba cada cuadro de un recorrido con todo lo que se
+mueve. No escribe nada en `~/Música`.
+
+`python3 pruebas/render.py captura.json` convierte una captura en PNG con sus
+colores de verdad (las líneas, los bloques y el braille se dibujan a mano, como
+hace la terminal); con `--hoja` o `--gif` y `--entre a:b`, una serie de cuadros
+grabados en una hoja o en un GIF. Para verla moverse de verdad,
+`python3 pruebas/demo.py` abre la interfaz en tu terminal con una cola de
+mentira que baja pista a pista, termina, busca y vuelve a bajar, y una tarjeta
+inventada en la pestaña 3. Antes de dar por buena una rama,
+`python3 pruebas/nombres.py flacpipe_tui.py flac_hunter/*.py` caza las
+funciones borradas o mal escritas que sólo fallarían al pintarse.
 
 Los módulos compartidos llevan prefijo `fh_` porque Nicotine+ carga los plugins
 haciendo `sys.path.append(carpeta_del_plugin)`: los imports son absolutos y un

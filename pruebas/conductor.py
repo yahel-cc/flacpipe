@@ -6,42 +6,53 @@ variables de entorno dónde volcar (SALIDA) y un escenario en JSON (ESCENARIO)
 con lo que hay que sobreescribir de fh_comun/flacpipe_tui para simular una
 cola, una descarga en marcha o una tarjeta montada.
 
-Se parchea `escribir` (la única primitiva que pinta texto) para llevar una
-copia exacta de lo que va a cada celda, con su color. Nada de emular ANSI.
+Tras cada cuadro se vuelca el lienzo de la interfaz (tui.LIENZO), que ya
+tiene el carácter, el color de frente y de fondo y el estilo de cada celda.
+Nada de emular ANSI. Con GRABAR=1 se guarda además cada cuadro por separado,
+para hacer GIFs con render.py, y en tiempos.json cuánto tarda en pintarse.
+
+demo.py reusa preparar() para montar el mismo escenario en tu terminal.
 """
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import flacpipe_tui as tui  # noqa: E402
 
-SALIDA = os.environ["SALIDA"]
-escenario = json.loads(os.environ.get("ESCENARIO", "{}"))
 
-comun = tui.comun
-for clave, valor in escenario.get("comun", {}).items():
-    setattr(comun, clave, valor)
-for clave, valor in escenario.get("tui", {}).items():
-    setattr(tui, clave, valor)
-for clave, valor in escenario.get("listas", {}).items():
-    setattr(tui.listas, clave, valor)
-if escenario.get("nicotine_vivo"):
-    comun.pid_nicotine = lambda: 424242
+def preparar(escenario):
+    """Sobreescribe lo que diga el escenario: rutas de la cola y el log,
+    Nicotine+ vivo, una tarjeta montada y una copia que finge escribir."""
+    comun = tui.comun
+    for clave, valor in escenario.get("comun", {}).items():
+        setattr(comun, clave, valor)
+    for clave, valor in escenario.get("tui", {}).items():
+        setattr(tui, clave, valor)
+    for clave, valor in escenario.get("listas", {}).items():
+        setattr(tui.listas, clave, valor)
+    if escenario.get("nicotine_vivo"):
+        comun.pid_nicotine = lambda: 424242
+    if escenario.get("fiio_falso"):
+        _fiio_falso(escenario.get("fiio_mb_s", 66))
 
-if escenario.get("fiio_falso"):
-    import time as _time
+
+def _fiio_falso(mb_s):
     fiio = tui.fiio
     fiio.detectar_destinos = lambda: [{
         "montaje": "/run/media/yahel/SNOWSKY", "dispositivo": "/dev/loop9", "tipo": "vfat",
         "libre": 27_400_000_000, "total": 32_000_000_000, "etiqueta": "SNOWSKY"}]
+    bloque = 2_000_000
+    pausa = bloque / (mb_s * 1_000_000)
 
     def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
                evento=None, cancelado=None):
         resumen = {"copiados": 0, "archivos": 0, "bytes": 0, "errores": []}
         for a in albumes:
             informar(f"▸ {a['rel']}")
-            evento({"t": "album", "rel": a["rel"], "pistas": len(a["pistas"]), "bytes": a["bytes"]})
+            evento({"t": "album", "rel": a["rel"], "pistas": len(a["pistas"]),
+                    "bytes": a["bytes"]})
             por_pista = a["bytes"] // max(1, len(a["pistas"]))
             for i, p in enumerate(a["pistas"], 1):
                 nombre = p if isinstance(p, str) else p.get("archivo", str(p))
@@ -51,10 +62,10 @@ if escenario.get("fiio_falso"):
                 while hecho < por_pista:
                     if cancelado and cancelado():
                         return resumen
-                    n = min(2_000_000, por_pista - hecho)
+                    n = min(bloque, por_pista - hecho)
                     hecho += n
                     evento({"t": "bytes", "n": n})
-                    _time.sleep(0.03)
+                    time.sleep(pausa)
                 evento({"t": "pista_ok", "archivo": nombre})
                 informar(f"  {tui.OK} {nombre}")
                 resumen["archivos"] += 1
@@ -66,49 +77,60 @@ if escenario.get("fiio_falso"):
 
     fiio.copiar = copiar
 
-LETRAS = "0123456789ABCDEFGHIJ"
-REJILLA = {"celdas": None}
-_escribir = tui.escribir
+
+def _volcar_json(numero):
+    """El cuadro tal cual quedó en el lienzo: carácter, frente, fondo y estilo
+    de cada celda, con los colores ya resueltos (256, o los básicos)."""
+    lienzo = tui.LIENZO
+    return {"frame": numero, "t": time.monotonic(),
+            "cols": lienzo.ancho, "filas": lienzo.alto,
+            "colores": tui._PALETA["colores"],
+            "texto": ["".join(c[0] for c in fila) for fila in lienzo.filas],
+            "frente": [[c[1] for c in fila] for fila in lienzo.filas],
+            "fondo": [[c[2] for c in fila] for fila in lienzo.filas],
+            "estilo": [[c[3] for c in fila] for fila in lienzo.filas]}
 
 
-def escribir(win, y, x, texto, color=tui.NORMAL, negrita=False, ancho=None):
-    r = _escribir(win, y, x, texto, color, negrita, ancho)
-    celdas = REJILLA["celdas"]
-    if celdas is None or not texto:
-        return r
-    alto, cols = win.getmaxyx()
-    if y < 0 or y >= alto or x < 0 or x >= cols:
-        return r
-    limite = cols - x
-    if ancho is not None:
-        limite = min(limite, ancho)
-    for i, ch in enumerate(texto[:limite]):
-        celdas[y][x + i] = (ch, color)
-    return r
+def volcar_cuadros(salida, grabar=False):
+    """Envuelve App.dibujar para dejar cada cuadro en `salida`."""
+    if grabar:
+        os.makedirs(os.path.join(salida, "cuadros"), exist_ok=True)
+    original = tui.App.dibujar
+    contador = {"n": 0}
+    tiempos = []
+
+    def dibujar(self):
+        inicio = time.perf_counter()
+        original(self)
+        tiempos.append(time.perf_counter() - inicio)
+        contador["n"] += 1
+        datos = _volcar_json(contador["n"])
+        texto = "\n".join(fila.rstrip() for fila in datos["texto"])
+        tmp = os.path.join(salida, "pantalla.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(f"# frame {contador['n']}  {datos['cols']}x{datos['filas']}\n")
+            f.write(texto + "\n")
+        os.replace(tmp, os.path.join(salida, "pantalla.txt"))
+        tmp = os.path.join(salida, "pantalla.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(datos, f, ensure_ascii=False)
+        os.replace(tmp, os.path.join(salida, "pantalla.json"))
+        if grabar:
+            with open(os.path.join(salida, "cuadros", f"{contador['n']:05d}.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(datos, f, ensure_ascii=False)
+        if contador["n"] % 30 == 0:
+            recientes = sorted(tiempos[-300:])
+            with open(os.path.join(salida, "tiempos.json"), "w") as f:
+                json.dump({"cuadros": contador["n"], "pares": len(tui._PARES),
+                           "mediana_ms": recientes[len(recientes) // 2] * 1000,
+                           "p95_ms": recientes[int(len(recientes) * 0.95)] * 1000,
+                           "max_ms": recientes[-1] * 1000}, f)
+
+    tui.App.dibujar = dibujar
 
 
-tui.escribir = escribir
-
-_dibujar = tui.App.dibujar
-CONTADOR = {"n": 0}
-
-
-def dibujar(self):
-    alto, cols = self.pantalla.getmaxyx()
-    REJILLA["celdas"] = [[(" ", 0)] * cols for _ in range(alto)]
-    _dibujar(self)
-    CONTADOR["n"] += 1
-    celdas = REJILLA["celdas"]
-    texto = "\n".join("".join(c for c, _k in fila).rstrip() for fila in celdas)
-    colores = "\n".join("".join(LETRAS[k] if c != " " else " " for c, k in fila).rstrip()
-                        for fila in celdas)
-    tmp = os.path.join(SALIDA, "pantalla.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(f"# frame {CONTADOR['n']}  {cols}x{alto}\n")
-        f.write(texto + "\n\n== colores ==\n" + colores + "\n")
-    os.replace(tmp, os.path.join(SALIDA, "pantalla.txt"))
-
-
-tui.App.dibujar = dibujar
-
-sys.exit(tui.ejecutar())
+if __name__ == "__main__":
+    preparar(json.loads(os.environ.get("ESCENARIO", "{}")))
+    volcar_cuadros(os.environ["SALIDA"], grabar=os.environ.get("GRABAR") == "1")
+    sys.exit(tui.ejecutar())
