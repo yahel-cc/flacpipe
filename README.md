@@ -130,22 +130,24 @@ en la vista en la que estás**. No hay nada que memorizar.
 
 | tecla | vista | para qué |
 |---|---|---|
-| `1` | Cola | las peticiones, con la fuente que ganó y las pistas cayendo una a una; `i` importa una playlist en CSV |
+| `1` | Cola | lo que se está bajando, con sus pistas cayendo una a una, una línea por lo que espera, busca o falló, y `↵` abre la ficha entera; `i` importa una playlist en CSV |
 | `2` | Biblioteca | artista → álbum → pistas en columnas; marcar lo que va a la tarjeta |
-| `3` | FiiO | la tarjeta, el plan de copia y el orden físico verificándose en vivo |
+| `3` | FiiO | la tarjeta en tres pantallas: lista para copiar (qué es nuevo, qué está al día, qué hay que arreglar), copiando y terminada |
 | `4` | Log | `pipeline.log` en directo, con la etiqueta coloreada y filtro |
 | `5` | Salud | `revisar` como lista, con la tecla que arregla cada cosa debajo |
 
 La navegación es **con flechas**; no hay atajos estilo vim. `?` abre la ayuda
 entera, `:` una paleta con todas las órdenes buscando por nombre, `q` sale.
 
-En la cola, el panel de la derecha **se reparte según el sitio que haya**: la
-ficha va a dos columnas cuando cabe y debajo aparecen las **pistas** del álbum
-(mientras baja, cayendo una a una, con la que está en curso y sus bytes
-subiendo), la **tabla de fuentes** que puntuó el plugin (la elegida, las
-descartadas y por cuántos puntos) y la **historia** de esa petición sacada de
-`pipeline.log`. Con la terminal muy ancha, pistas a un lado y fuentes e
-historia al otro; con poca altura se quedan sólo los campos que pesan.
+La Cola enseña **sólo lo que se baja**: cada álbum en curso es un bloque con
+su barra, y debajo sus pistas, la que está en curso con sus bytes subiendo y
+su velocidad; las que ya están bajadas se ponen en verde y se van. Lo que
+espera, busca fuente o falló ocupa **una línea** debajo (las fallidas llevan al
+final `r reintentar  x quitar`). `↵` abre **la ficha entera** de la petición
+seleccionada: los campos, las pistas, la **tabla de fuentes** que puntuó el
+plugin (la elegida, las descartadas y por cuántos puntos) y la **historia**
+sacada de `pipeline.log`. Con poca altura la ficha se queda sólo con los campos
+que pesan.
 
 El tema es **acuático**: azules que van de lo hondo a la espuma para casi todo,
 y sólo tres tonos para lo que tiene que saltar a la vista: espuma (bien), coral
@@ -163,7 +165,8 @@ pantalla se queda quieta:
 | el oleaje y la línea de agua junto a la velocidad | los bytes por segundo: suben, se aclaran o se quedan abajo y oscuros |
 | `flacpipe` fluyendo en la cabecera | hay una descarga o una copia en marcha |
 | un destello de espuma (o coral) que cruza una fila | esa petición acaba de terminar (o de fallar) |
-| un número de pista que salpica espuma | esa pista acaba de quedar escrita en la tarjeta |
+| una pista que se pone verde y se va | esa pista acaba de quedar bajada |
+| el progreso de la copia en la cabecera, en todas las pestañas | hay una copia al FiiO en marcha: álbum, porcentaje y cuánto falta |
 
 La cuenta de la búsqueda son los 45 s que el plugin acumula resultados. Al
 cambiar de pestaña, la raya de debajo se desliza hasta la nueva y frena al
@@ -203,16 +206,17 @@ teclas van a esa ventana y no a la pestaña: `esc` la cierra.
 
 #### 1 · Cola
 
-A la izquierda, las peticiones activas y las 8 últimas terminadas; a la
-derecha, la ficha de la seleccionada.
+Lo que se baja, en bloques con sus pistas, y debajo una línea por cada
+petición que espera, busca fuente o falló. Lo ya terminado no se queda aquí.
 
 | tecla | qué hace |
 |---|---|
 | `↑↓` | moverse por las peticiones. `RePág`/`AvPág` saltan de 5 en 5; `Inicio`/`Fin` van a la primera y a la última |
 | `a` | pedir algo: abre una ventana para escribir qué buscar («Artista - Álbum» funciona mejor que un título suelto). `⇥` cambia entre álbum y canción, `↵` lo encola, `esc` cancela |
 | `i` | importar una playlist en CSV (Exportify, TuneMyMusic…). Primero eliges el archivo con `↑↓` y `↵`; luego ves el plan: qué se va a pedir y qué ya tienes. Ahí `⇥` cambia entre pedir las canciones o los álbumes completos, `r` decide si se piden también las que ya tienes o que ya están en la cola (por defecto se saltan), `↵` encola y `esc` vuelve a la lista de archivos |
-| `x` | cancelar la petición seleccionada. Sólo sirve con las que siguen activas |
-| `t` | alternar entre ver sólo lo activo y lo reciente o **toda** la historia de la cola, de lo más nuevo a lo más viejo |
+| `x` | cancelar la petición seleccionada si sigue activa; si está fallida, la quita de la cola |
+| `r` | reintentar la petición fallida: vuelve a esperar turno con los intentos a cero (las fuentes descartadas se quedan descartadas) |
+| `↵` | la ficha entera de la seleccionada: campos, pistas, fuentes e historia. `esc` la cierra |
 | `L` | limpiar: saca de la cola todo lo terminado (listo, fallido o cancelado). Lo activo no se toca |
 | `o` | organizar `.descargas`: lo que el plugin no llegó a archivar pasa a `~/Música/Artista/Álbum`. Los FLAC sueltos se agrupan antes por sus tags. El progreso se ve aquí mismo |
 | `c` | ir a la pestaña FiiO |
@@ -238,20 +242,26 @@ Tres columnas: artistas → álbumes → pistas.
 
 #### 3 · FiiO
 
-La tarjeta montada y el plan de copia: los álbumes marcados o, si no hay
-marcas, toda la biblioteca que estés mirando (nueva o heredada). Se copia a
-`Artistas/` dentro de la tarjeta, álbum por álbum y pista por pista, en orden.
+La tarjeta montada y qué le falta. Antes de copiar, la lista reparte los
+álbumes en **nuevos** (no están en la tarjeta), **al día** (ya están completos
+y en orden) y **por arreglar** (incompletos o en otro orden). El plan son los
+marcados o, si no hay marcas, toda la biblioteca que estés mirando (nueva o
+heredada). Se copia a `Artistas/` dentro de la tarjeta, álbum por álbum y pista
+por pista, en orden.
 
 | tecla | qué hace |
 |---|---|
-| `↑↓` | elegir la tarjeta, si hay más de una montada |
-| `↵` o `c` | copiar. Antes comprueba que hay tarjeta, que hay algo que copiar y que cabe, y pide confirmación. Los álbumes que ya están completos y en orden se saltan; los que están incompletos o en otro orden **no se tocan**, sólo avisa de ellos (para eso está `w`) |
+| `↵` o `c` | copiar **sin preguntar** los álbumes nuevos. No pisa nada: antes sólo comprueba que hay tarjeta, que hay algo nuevo y que cabe. Con la copia ya terminada, `↵` vuelve a la lista (o copia otra vez) |
 | `n` | simular: enseña lo que copiaría, pista por pista, sin escribir nada |
-| `w` | rehacer: como `↵`, pero los álbumes que ya estén en la tarjeta se **borran y se reescriben** en orden. Es la única forma de arreglar el orden en FAT/exFAT. Pide confirmación |
-| `m` | quitar todas las marcas; el plan vuelve a ser toda la biblioteca |
+| `w` | arreglar el orden: **borra y reescribe** sólo los álbumes que están en otro orden o incompletos, no todos los que ya hay en la tarjeta. Es la única forma de arreglar el orden en FAT/exFAT. Pide confirmación |
 | `u` | expulsar la tarjeta: sincroniza lo pendiente y la desmonta para que se pueda sacar sin peligro |
-| `r` | volver a calcular el plan |
-| `x` | sólo mientras copia: abortar después de la pista en curso. El álbum a medias queda marcado como desordenado; arréglalo después con `w` |
+| `m` | quitar todas las marcas; el plan vuelve a ser toda la biblioteca |
+| `r` | volver a calcular qué es nuevo |
+| `↑↓` | elegir la tarjeta si hay más de una montada; con una sola, desplazan la lista |
+| `esc` o `x` | sólo mientras copia: parar después de la pista en curso. El álbum a medias queda como incompleto; arréglalo después con `w` |
+
+La fila de estado dice «listo para copiar · pulsa ↵» cuando hay álbumes nuevos
+y «✓ copia terminada a las HH:MM» al acabar una copia.
 
 #### 4 · Log
 
@@ -281,8 +291,9 @@ problema lleva debajo la tecla que lo arregla.
 
 #### Confirmaciones
 
-Cuando algo pregunta «¿…?»: `s`, `y` o `↵` dicen que sí; `n`, `q` o `esc`, que
-no.
+Cuando algo pregunta «¿…?» (borrar, mover a la heredada, reescribir con `w`):
+`s`, `y` o `↵` dicen que sí; `n`, `q` o `esc`, que no. Copiar los álbumes
+nuevos al FiiO con `↵` no pregunta.
 
 La CLI sigue entera y es la que hay que usar en scripts o con tuberías: la
 interfaz no la sustituye, sólo evita tener que recordarla.

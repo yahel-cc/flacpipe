@@ -4873,14 +4873,17 @@ class App:
              lambda: self.abrir(OverlayImportar())),
             ("cancelar la petición seleccionada", "x",
              lambda: self.cancelar_peticion(self.vistas[0].seleccion(self))),
+            ("reintentar la petición fallida", "r",
+             lambda: self.reintentar_peticion(self.vistas[0].seleccion(self))),
+            ("quitar la petición fallida", "x",
+             lambda: self.quitar_peticion(self.vistas[0].seleccion(self))),
             ("limpiar lo terminado de la cola", "L", self.limpiar_cola),
             ("organizar .descargas", "o", self.organizar),
-            ("copiar al FiiO", "c", lambda: (self.ir_a(2),
+            ("copiar al FiiO los álbumes nuevos", "↵", lambda: (self.ir_a(2),
                                              vista_fiio._pedir_copia(self, False))),
-            ("copiar al FiiO en simulación", "n",
-             lambda: (self.ir_a(2), self.copiar_fiio(vista_fiio.montaje(self),
-                                                     vista_fiio.plan, simular=True))),
-            ("reescribir en la tarjeta (--rehacer)", "w",
+            ("simular la copia de los álbumes nuevos", "n",
+             lambda: (self.ir_a(2), vista_fiio._simular(self))),
+            ("reescribir los álbumes en otro orden o incompletos", "w",
              lambda: (self.ir_a(2), vista_fiio._pedir_copia(self, True))),
             ("quitar todas las marcas", "m", lambda: (self.marcados.clear(),
                                                       vista_fiio.calcular(self))),
@@ -5243,6 +5246,15 @@ class App:
             escribir_trozos(win, y, 3 + len(texto),
                             chispa(velocidad.historial, min(30, ancho - 20)))
             return
+        if isinstance(self.vista(), VistaFiio):
+            copia = self.ultima_copia
+            if copia is not None and not copia.simulacion and self.vista()._terminada(self) is not None:
+                escribir(win, y, 1, f"✓ copia terminada a las {VistaFiio._hora(copia.fin or copia.inicio)}", ESPUMA)
+                return
+            reparto = self.vista()._reparto(self)
+            if reparto is not None and reparto["nuevos"] and self.vista().montaje(self) is not None:
+                escribir(win, y, 1, "listo para copiar · pulsa ↵", ESPUMA)
+                return
         escribir(win, y, 1, "todo en calma", TENUE)
 
     def _teclas(self, y, ancho):

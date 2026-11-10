@@ -433,8 +433,9 @@ def importar(cols, filas, etiqueta):
     cola = json.load(open(esc["_cola"]))
     nuevas = [p for p in cola["peticiones"] if p.get("lista")]
     print(f"  encoladas de verdad: {len(nuevas)}  lista={nuevas[0]['lista'] if nuevas else None}")
-    s.teclas("\x1bOF")                   # la última encolada: su ficha dice de qué lista vino
+    s.teclas("\x1bOF", "\x1bOA", "\r")  # la última encolada (la fallida va al final): su ficha (↵) dice de qué lista vino
     s.capturar("ficha-lista", espera=0.6)
+    s.teclas("\x1b")
     s.teclas("i", "\x1bOF", "\r")        # el último de la lista: raro.csv
     s.capturar("error", espera=0.8)
     s.teclas("\x1b", "\x1bOA", "\r")    # tunemymusic.csv
