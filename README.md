@@ -145,23 +145,144 @@ ficha va a dos columnas cuando cabe y debajo aparecen las **pistas** del álbum
 subiendo), la **tabla de fuentes** que puntuó el plugin (la elegida, las
 descartadas y por cuántos puntos) y la **historia** de esa petición sacada de
 `pipeline.log`. Con la terminal muy ancha, pistas a un lado y fuentes e
-historia al otro; con poca altura se quedan sólo los campos que pesan. Todo lo
-que se mueve mide algo real: el medidor VU y la chispa salen de los bytes por
-segundo, la cuenta de la búsqueda son los 45 s que el plugin acumula
-resultados, y las peticiones en espera «respiran». Cuando un álbum termina, un
-aviso entra deslizándose por la derecha y la fila parpadea en verde.
+historia al otro; con poca altura se quedan sólo los campos que pesan.
 
-En la biblioteca, `espacio` marca álbumes y `c` los manda a la tarjeta en ese
-orden; `p` reproduce la pista seleccionada con el primer reproductor que
-encuentre (`mpv`, `gst-play-1.0`, `pw-play`, `ffplay` o `mplayer`) y `s` la para.
+El tema es **acuático**: azules que van de lo hondo a la espuma para casi todo,
+y sólo tres tonos para lo que tiene que saltar a la vista: espuma (bien), coral
+(mal) y arena (ojo). **Todo lo que se mueve mide algo real**, y en reposo la
+pantalla se queda quieta:
+
+| qué se mueve | qué significa |
+|---|---|
+| burbujas que suben | algo está trabajando (leer la biblioteca, revisar, una copia) |
+| un sonar que se abre y se apaga | la petición está buscando fuentes |
+| gotas que caen | la petición está bajando |
+| un punto que respira | la petición espera turno |
+| un reflejo que recorre una barra | alguien la está llenando ahora mismo (bytes que llegan o se escriben) |
+| un pulso de luz por una línea fina | la pista en curso, cuyo tamaño final no se sabe |
+| el oleaje y la línea de agua junto a la velocidad | los bytes por segundo: suben, se aclaran o se quedan abajo y oscuros |
+| `flacpipe` fluyendo en la cabecera | hay una descarga o una copia en marcha |
+| un destello de espuma (o coral) que cruza una fila | esa petición acaba de terminar (o de fallar) |
+| un número de pista que salpica espuma | esa pista acaba de quedar escrita en la tarjeta |
+
+La cuenta de la búsqueda son los 45 s que el plugin acumula resultados. Al
+cambiar de pestaña, la raya de debajo se desliza hasta la nueva y frena al
+llegar; al abrir una ventana, lo de detrás se hunde. Los avisos entran
+deslizándose por la derecha como una tarjeta con el filo de su color.
+
+Mientras algo se mueve, la pantalla se repinta a 30 cuadros por segundo (pintar
+uno cuesta un par de milisegundos); si no, cuatro por segundo bastan para el
+reloj. Se dibuja con la paleta de 256 colores: en una terminal de 8 o 16
+colores se toma lo más parecido de los básicos, y sin color, negrita e inverso.
 
 La biblioteca **se relee sola** cuando el plugin organiza un álbum: cada pocos
 segundos se compara el mtime de la raíz y el de cada carpeta de artista, y si
 algo cambió se recarga sin perder dónde estabas (la posición se recuerda por
-nombre, no por índice). `r` la fuerza a mano. `b` cambia entre la biblioteca
-nueva y la heredada, y **la esquina derecha de las pestañas dice siempre en cuál
-estás** — si un álbum recién bajado «no aparece», casi siempre es que estabas
-mirando la heredada.
+nombre, no por índice). **La esquina derecha de las pestañas dice siempre qué
+biblioteca estás mirando**: si un álbum recién bajado «no aparece», casi siempre
+es que estabas en la heredada.
+
+### Teclas, pestaña por pestaña
+
+Lo mismo que muestran la última fila y `?`, con lo que hace cada tecla de
+verdad. Las mayúsculas cuentan: `L` y `R` no son `l` ni `r`.
+
+#### En todas partes
+
+| tecla | qué hace |
+|---|---|
+| `1` … `5` | ir a Cola, Biblioteca, FiiO, Log o Salud |
+| `⇥` / `⇧⇥` | pestaña siguiente / anterior |
+| `?` | ayuda: las teclas generales y las de la pestaña en la que estás. Cualquier tecla la cierra |
+| `:` | paleta de órdenes: escribe parte del nombre, elige con `↑↓` y ejecuta con `↵`. Junta órdenes de todas las pestañas, así que se puede, por ejemplo, copiar al FiiO desde la Cola. Las que no tienen tecla propia (pedir una canción suelta, abrir Nicotine+, abrir `pipeline.log` en `$EDITOR`) sólo están aquí |
+| `s` | para la música que esté sonando, estés en la pestaña que estés |
+| `q` | salir. Si hay una tarea corriendo (copia, organizar, expulsar…) pregunta antes |
+
+Con una ventana emergente abierta (pedir, buscar, confirmar, paleta…), las
+teclas van a esa ventana y no a la pestaña: `esc` la cierra.
+
+#### 1 · Cola
+
+A la izquierda, las peticiones activas y las 8 últimas terminadas; a la
+derecha, la ficha de la seleccionada.
+
+| tecla | qué hace |
+|---|---|
+| `↑↓` | moverse por las peticiones. `RePág`/`AvPág` saltan de 5 en 5; `Inicio`/`Fin` van a la primera y a la última |
+| `a` | pedir algo: abre una ventana para escribir qué buscar («Artista - Álbum» funciona mejor que un título suelto). `⇥` cambia entre álbum y canción, `↵` lo encola, `esc` cancela |
+| `i` | importar una playlist en CSV (Exportify, TuneMyMusic…). Primero eliges el archivo con `↑↓` y `↵`; luego ves el plan: qué se va a pedir y qué ya tienes. Ahí `⇥` cambia entre pedir las canciones o los álbumes completos, `r` decide si se piden también las que ya tienes o que ya están en la cola (por defecto se saltan), `↵` encola y `esc` vuelve a la lista de archivos |
+| `x` | cancelar la petición seleccionada. Sólo sirve con las que siguen activas |
+| `t` | alternar entre ver sólo lo activo y lo reciente o **toda** la historia de la cola, de lo más nuevo a lo más viejo |
+| `L` | limpiar: saca de la cola todo lo terminado (listo, fallido o cancelado). Lo activo no se toca |
+| `o` | organizar `.descargas`: lo que el plugin no llegó a archivar pasa a `~/Música/Artista/Álbum`. Los FLAC sueltos se agrupan antes por sus tags. El progreso se ve aquí mismo |
+| `c` | ir a la pestaña FiiO |
+
+#### 2 · Biblioteca
+
+Tres columnas: artistas → álbumes → pistas.
+
+| tecla | qué hace |
+|---|---|
+| `←→` | cambiar de columna |
+| `↑↓` | moverse dentro de la columna. `RePág`/`AvPág` saltan de 10 en 10, `Inicio` va arriba. Al cambiar de artista o de álbum, las columnas de la derecha vuelven al principio |
+| `espacio` | marcar o desmarcar el álbum del cursor (lleva un `▸`). Los marcados son lo que se copia a la tarjeta y lo que `h` mueve; la barra de estado dice cuántos llevas |
+| `c` | ir a la pestaña FiiO para copiar. Si no habías marcado nada, antes marca el álbum del cursor, así que copia sólo ese y no la biblioteca entera |
+| `p` | reproducir la pista seleccionada con el primer reproductor que encuentre (`mpv`, `gst-play-1.0`, `pw-play`, `afplay`, `ffplay` o `mplayer`) |
+| `s` | parar la reproducción |
+| `/` | filtrar artistas por nombre mientras escribes. `↵` deja el filtro puesto; `esc` lo quita |
+| `r` | releer la biblioteca del disco ahora, sin esperar a que se relea sola |
+| `b` | cambiar entre la biblioteca nueva (`~/Música`) y la heredada (`~/Música/Artistas`). Sólo cambia lo que ves; no mueve nada. El cursor vuelve al principio |
+| `h` | **mover** a la heredada, la carpeta que comparte Nicotine+. Mueve lo marcado; si no hay marcas, el artista entero cuando el cursor está en la columna de artistas, o el álbum del cursor en las otras. Pide confirmación, no pisa un álbum que ya esté en la heredada y borra la carpeta del artista en la nueva si queda vacía. Lo movido deja de salir en la biblioteca nueva y en la copia normal a la FiiO: para copiarlo, cambia antes con `b` a la heredada. Mirando la heredada, `h` no hace nada |
+| `d` o `Supr` | **borrar** del disco. Con álbumes marcados, borra sólo esos, sin preguntar. Sin marcas, borra la carpeta entera del cursor (el artista en la columna de artistas, el álbum en las otras) y antes pregunta «¿Estás seguro de borrar todo en la carpeta…?» con `s` sí / `n` no. Si la carpeta del artista queda vacía, también se va. No se puede deshacer |
+| `o` | organizar `.descargas`, igual que en la Cola. Te lleva a la Cola para ver el progreso |
+
+#### 3 · FiiO
+
+La tarjeta montada y el plan de copia: los álbumes marcados o, si no hay
+marcas, toda la biblioteca que estés mirando (nueva o heredada). Se copia a
+`Artistas/` dentro de la tarjeta, álbum por álbum y pista por pista, en orden.
+
+| tecla | qué hace |
+|---|---|
+| `↑↓` | elegir la tarjeta, si hay más de una montada |
+| `↵` o `c` | copiar. Antes comprueba que hay tarjeta, que hay algo que copiar y que cabe, y pide confirmación. Los álbumes que ya están completos y en orden se saltan; los que están incompletos o en otro orden **no se tocan**, sólo avisa de ellos (para eso está `w`) |
+| `n` | simular: enseña lo que copiaría, pista por pista, sin escribir nada |
+| `w` | rehacer: como `↵`, pero los álbumes que ya estén en la tarjeta se **borran y se reescriben** en orden. Es la única forma de arreglar el orden en FAT/exFAT. Pide confirmación |
+| `m` | quitar todas las marcas; el plan vuelve a ser toda la biblioteca |
+| `u` | expulsar la tarjeta: sincroniza lo pendiente y la desmonta para que se pueda sacar sin peligro |
+| `r` | volver a calcular el plan |
+| `x` | sólo mientras copia: abortar después de la pista en curso. El álbum a medias queda marcado como desordenado; arréglalo después con `w` |
+
+#### 4 · Log
+
+`pipeline.log` en directo, con las etiquetas coloreadas.
+
+| tecla | qué hace |
+|---|---|
+| `↑↓` | moverse línea a línea. `RePág`/`AvPág` saltan de 10 en 10. Al moverte se deja de seguir el final |
+| `Inicio` | ir a la primera línea |
+| `Fin` | ir al final y volver a seguirlo |
+| `f` | alternar entre seguir el final (cada línea nueva aparece abajo) y fijar la vista donde está |
+| `/` | dejar sólo las líneas que contengan el texto. `↵` lo aplica; `esc` lo quita |
+
+#### 5 · Salud
+
+Lo mismo que `flacpipe revisar`, como lista: la instalación del plugin,
+Nicotine+, la cola y las descargas, los álbumes incompletos y la tarjeta. Cada
+problema lleva debajo la tecla que lo arregla.
+
+| tecla | qué hace |
+|---|---|
+| `R` | volver a revisar todo |
+| `o` | organizar `.descargas` (te lleva a la Cola para ver el progreso) |
+| `p` | volver a pedir el primer álbum incompleto de la lista |
+| `n` | abrir Nicotine+ si no está corriendo |
+| `3` | ir a la pestaña FiiO (es la tecla general de pestañas) |
+
+#### Confirmaciones
+
+Cuando algo pregunta «¿…?»: `s`, `y` o `↵` dicen que sí; `n`, `q` o `esc`, que
+no.
 
 La CLI sigue entera y es la que hay que usar en scripts o con tuberías: la
 interfaz no la sustituye, sólo evita tener que recordarla.
@@ -351,17 +472,33 @@ las entradas de un directorio.
 | `flacpipe_tui.py` | La interfaz a pantalla completa (curses) |
 | `instalar.py` | Instalador para los tres sistemas; `instalar.sh` e `instalar.bat` sólo lo lanzan |
 | `pruebas/probar.py` | Banco de pruebas de la interfaz: la corre en un pty y captura la pantalla |
+| `pruebas/conductor.py` | Lo que corre dentro del pty: monta el escenario y vuelca cada cuadro |
+| `pruebas/render.py` | Pinta las capturas como PNG, hojas de cuadros o GIF (necesita Pillow) |
+| `pruebas/demo.py` | La interfaz en tu terminal con descargas y una tarjeta de mentira |
+| `pruebas/nombres.py` | Busca nombres sin definir: el `NameError` que sólo salta al pintar |
 
 La interfaz vive fuera de `flac_hunter/` a propósito: nunca la carga Nicotine+,
 sólo lee `cola.json` y `pipeline.log` con el mismo `flock` que todo lo demás, y
 lanza el trabajo pesado en un hilo. **El plugin no sabe que existe.**
 
 Para ver la interfaz sin abrirla, `python3 pruebas/probar.py` la lanza dentro
-de un pty en tres tamaños de terminal, le manda teclas y guarda capturas de
-texto (con un mapa de colores al lado) en `pruebas/salida/capturas/`. Con
-`real` usa tu cola de verdad, sólo lectura; con `falso` simula una descarga
-que avanza, una búsqueda, una espera y un álbum que termina; con `fiio`, una
-copia a una tarjeta inventada. No escribe nada en `~/Música`.
+de un pty en tres tamaños de terminal, le manda teclas y guarda capturas en
+`pruebas/salida/capturas/`: el texto y, al lado, un `.json` con el carácter, los
+colores y el estilo de cada celda tal como quedaron en el lienzo. Con `real` usa
+tu cola de verdad, sólo lectura; con `falso` simula una descarga que avanza, una
+búsqueda, una espera y un álbum que termina; con `fiio`, una copia a una tarjeta
+inventada; con `animar`, graba cada cuadro de un recorrido con todo lo que se
+mueve. No escribe nada en `~/Música`.
+
+`python3 pruebas/render.py captura.json` convierte una captura en PNG con sus
+colores de verdad (las líneas, los bloques y el braille se dibujan a mano, como
+hace la terminal); con `--hoja` o `--gif` y `--entre a:b`, una serie de cuadros
+grabados en una hoja o en un GIF. Para verla moverse de verdad,
+`python3 pruebas/demo.py` abre la interfaz en tu terminal con una cola de
+mentira que baja pista a pista, termina, busca y vuelve a bajar, y una tarjeta
+inventada en la pestaña 3. Antes de dar por buena una rama,
+`python3 pruebas/nombres.py flacpipe_tui.py flac_hunter/*.py` caza las
+funciones borradas o mal escritas que sólo fallarían al pintarse.
 
 Los módulos compartidos llevan prefijo `fh_` porque Nicotine+ carga los plugins
 haciendo `sys.path.append(carpeta_del_plugin)`: los imports son absolutos y un
