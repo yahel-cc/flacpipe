@@ -2580,17 +2580,45 @@ class VistaBiblioteca(Vista):
 
 
 class VistaFiio(Vista):
+    """La copia a la tarjeta en tres pantallas: lista para copiar, copiando y
+    terminada.
+
+    Qué hay que copiar lo dice fiio.clasificar() contra la tarjeta elegida
+    (se vuelve a mirar al cambiar de tarjeta o de marcas y al acabar una
+    copia); el progreso sale de Trabajo.Copia y, al acabar, de
+    app.ultima_copia. La pantalla de terminada se queda hasta ↵, hasta que
+    aparece otra tarjeta o hasta volver a la pestaña con la tarjeta ya fuera."""
     nombre = "FiiO"
 
+    # Fondo de la franja y del botón de cada tono: en 256 colores, letra
+    # oscura sobre el color; con 8/16, lo que los básicos dejan leer.
+    _FONDOS_256 = {AGUA: 81, ESPUMA: 79, CORAL: 210, ARENA: 222}
+    _FONDOS_BASICOS = {ESPUMA: curses.COLOR_GREEN, CORAL: curses.COLOR_RED}
+    MOTIVO_AL_DIA = "ya está y en orden"
+
     def __init__(self):
-        self.plan = []
-        self.plan_para = None
+        self.todos = []          # lo que hay en la biblioteca (o lo marcado)
+        self.reparto = None      # fiio.clasificar() contra la tarjeta elegida
+        self.en_tarjeta = {}     # rel → bytes que ya ocupan en la tarjeta los de w
+        self.calculado_para = None
         self.calculando = False
         self.destino = 0
         self.desplazado = 0
+        self.cerrada = None      # la copia terminada que ya no se enseña
+        self._fin_visto = None   # (copia, montajes que había al enseñarla)
+
+    @property
+    def plan(self):
+        """Lo que copiaría ↵: los álbumes que aún no están en la tarjeta."""
+        return list((self.reparto or {}).get("nuevos", []))
 
     def entrar(self, app):
-        self.calcular(app)
+        copia = app.ultima_copia
+        montajes = {d["montaje"] for d in app.datos.destinos}
+        if copia is not None and copia.montaje not in montajes:
+            self.cerrada = copia        # volver con la tarjeta ya fuera
+        if self._clave(app) != self.calculado_para:
+            self.calcular(app)
 
     def montaje(self, app):
         destinos = app.datos.destinos
@@ -2599,107 +2627,612 @@ class VistaFiio(Vista):
         self.destino = max(0, min(self.destino, len(destinos) - 1))
         return destinos[self.destino]
 
+    @staticmethod
+    def etiqueta(destino):
+        return (destino.get("etiqueta")
+                or os.path.basename(destino["montaje"].rstrip("/\\")) or "tarjeta")
+
+    # ── qué hay que copiar ──
+    def _clave(self, app):
+        destino = self.montaje(app)
+        copia = app.ultima_copia
+        return (app.biblioteca.raiz, tuple(sorted(app.marcados)),
+                destino["montaje"] if destino else None,
+                id(copia) if copia is not None else None)
+
     def calcular(self, app):
+        """listar_biblioteca + clasificar contra la tarjeta elegida, en su hilo."""
         if self.calculando:
             return
         self.calculando = True
-        filtros = sorted(app.marcados) or None
-        raiz = app.biblioteca.raiz
+        clave = self._clave(app)
+        raiz, filtros, montaje = clave[0], list(clave[1]) or None, clave[2]
 
         def trabajo():
             try:
-                self.plan = fiio.listar_biblioteca(raiz=raiz, filtros=filtros)
+                todos = fiio.listar_biblioteca(raiz=raiz, filtros=filtros)
             except Exception:
-                self.plan = []
-            self.plan_para = (raiz, tuple(filtros or ()))
+                todos = []
+            reparto, en_tarjeta = None, {}
+            if montaje:
+                destino_raiz = os.path.join(montaje, fiio.DESTINO_REL_POR_DEFECTO)
+                try:
+                    reparto = fiio.clasificar(destino_raiz, todos)
+                except Exception:
+                    reparto = None
+                for a in (reparto or {}).get("otro_orden", []) + \
+                        (reparto or {}).get("distintos", []):
+                    en_tarjeta[a["rel"]] = self._peso(
+                        os.path.join(destino_raiz, a["artista"], a["album"]))
+            self.todos, self.reparto, self.en_tarjeta = todos, reparto, en_tarjeta
+            self.calculado_para = clave
             self.calculando = False
 
         threading.Thread(target=trabajo, daemon=True).start()
 
+    @staticmethod
+    def _peso(carpeta):
+        try:
+            return sum(os.path.getsize(os.path.join(carpeta, n)) for n in os.listdir(carpeta))
+        except OSError:
+            return 0
+
+    def _reparto(self, app):
+        """El reparto si corresponde a la tarjeta y las marcas de ahora."""
+        if self.reparto is not None and self.calculado_para == self._clave(app):
+            return self.reparto
+        return None
+
+    def _arreglar(self, reparto):
+        return list((reparto or {}).get("otro_orden", [])) + \
+            list((reparto or {}).get("distintos", []))
+
+    @staticmethod
+    def _copiando_ahora(app):
+        trabajo = app.trabajo
+        if trabajo.activo and trabajo.clase == "copia" and trabajo.copia is not None:
+            return trabajo.copia
+        return None
+
+    def _terminada(self, app):
+        """La copia acabada que toca enseñar, o None."""
+        copia = app.ultima_copia
+        if copia is None or copia is self.cerrada or self._copiando_ahora(app):
+            return None
+        montajes = {d["montaje"] for d in app.datos.destinos}
+        if self._fin_visto is None or self._fin_visto[0] is not copia:
+            self._fin_visto = (copia, montajes)
+        elif montajes - self._fin_visto[1]:
+            self.cerrada = copia        # ha aparecido otra tarjeta
+            return None
+        return copia
+
+    # ── lo que se ve ──
+    def resumen(self, app):
+        copia = self._copiando_ahora(app)
+        if copia is not None:
+            que = "simulando" if copia.simulacion else "copiando"
+            return f"{copia.etiqueta} · {que} {int(copia.frac() * 100)} %"
+        copia = self._terminada(app)
+        if copia is not None and copia.expulsada:
+            return f"{copia.etiqueta} expulsada"
+        destino = self.montaje(app)
+        if destino is None:
+            return "sin tarjeta"
+        reparto = self._reparto(app)
+        if reparto is None:
+            return self.etiqueta(destino)
+        nuevos, arreglar = len(reparto["nuevos"]), len(self._arreglar(reparto))
+        if nuevos:
+            return f"{self.etiqueta(destino)} · {nuevos} por copiar"
+        if arreglar:
+            return f"{self.etiqueta(destino)} · {arreglar} por arreglar"
+        return f"{self.etiqueta(destino)} · al día"
+
     def teclas(self, app):
-        if app.trabajo.activo:
-            return [("x", "abortar")]
-        return [("↵", "copiar"), ("n", "simular"), ("w", "rehacer"),
-                ("m", "quitar marcas"), ("u", "expulsar"), ("↑↓", "tarjeta")]
+        if self._copiando_ahora(app) is not None:
+            # fiio.copiar() mira la cancelación entre archivos: la pista en
+            # curso se termina y el álbum a medias queda para w.
+            return [("esc", "cancelar (termina la pista actual)")]
+        copia = self._terminada(app)
+        if copia is not None:
+            teclas = []
+            if not copia.simulacion and not copia.expulsada:
+                teclas.append(("u", "expulsar"))
+            teclas.append(("↵", "volver a la lista" if copia.simulacion else "copiar otra vez"))
+            if self._arreglar(self._reparto(app)):
+                teclas.append(("w", "arreglar orden"))
+            return teclas
+        if self.montaje(app) is None:
+            return []
+        reparto = self._reparto(app)
+        teclas = []
+        if reparto is not None and reparto["nuevos"]:
+            teclas += [("↵", "copiar"), ("n", "simular")]
+        if self._arreglar(reparto):
+            teclas.append(("w", "arreglar orden"))
+        teclas.append(("u", "expulsar"))
+        if len(app.datos.destinos) > 1:
+            teclas.append(("↑↓", "tarjeta"))
+        if app.marcados:
+            teclas.append(("m", "quitar marcas"))
+        return teclas
 
     def dibujar(self, app, y0, alto, ancho):
-        win = app.pantalla
-        if app.trabajo.clase == "copia" and app.trabajo.reciente():
-            self.panel_trabajo(app, y0, alto, ancho)
+        copia = self._copiando_ahora(app)
+        if copia is not None:
+            self._pintar_copiando(app, copia, y0, alto, ancho)
             return
+        if self._clave(app) != self.calculado_para:
+            self.calcular(app)
+        copia = self._terminada(app)
+        if copia is not None:
+            self._pintar_terminada(app, copia, y0, alto, ancho)
+            return
+        self._pintar_lista(app, y0, alto, ancho)
 
+    # ── piezas comunes ──
+    @classmethod
+    def _resalte(cls, color):
+        """Letra oscura sobre `color`: la franja de arriba y el botón de la caja."""
+        if _PALETA["colores"] >= 256:
+            return (16, cls._FONDOS_256.get(color, 81), NEGRITA)
+        if _PALETA["colores"] and color in cls._FONDOS_BASICOS:
+            return (-1, cls._FONDOS_BASICOS[color], NEGRITA)
+        return INV
+
+    @staticmethod
+    def _nombre(a):
+        return f"{a['artista']} — {a['album']}" if a.get("artista") else a["rel"]
+
+    @staticmethod
+    def _hora(segundos_epoch):
+        return time.strftime("%H:%M", time.localtime(segundos_epoch))
+
+    @staticmethod
+    def _tiempo(segundos):
+        segundos = max(1, int(round(segundos)))
+        if segundos < 90:
+            return f"{segundos} s"
+        minutos = int(round(segundos / 60))
+        if minutos < 90:
+            return f"{minutos} min"
+        return f"{minutos // 60} h {minutos % 60:02d} min"
+
+    @staticmethod
+    def _plural(n, uno, varios):
+        return f"{n} {uno if n == 1 else varios}"
+
+    @staticmethod
+    def _caja(win, y, x, ancho, filas):
+        """Un recuadro con una fila de trozos por línea. Devuelve la y siguiente."""
+        escribir(win, y, x, "┌" + VACIO * (ancho - 2) + "┐", LINEA)
+        for i, trozos in enumerate(filas, 1):
+            escribir(win, y + i, x, "│", LINEA)
+            escribir_trozos(win, y + i, x + 3, trozos, ancho=ancho - 5)
+            escribir(win, y + i, x + ancho - 1, "│", LINEA)
+        escribir(win, y + len(filas) + 1, x, "└" + VACIO * (ancho - 2) + "┘", LINEA)
+        return y + len(filas) + 2
+
+    @staticmethod
+    def _franja(win, y, ancho, izq, variantes):
+        """La fila de la franja: `izq` a la izquierda y, a la derecha, la
+        primera de `variantes` (texto) que quepa."""
+        largo = sum(len(t) for t, _c in izq)
+        der = ()
+        for texto in variantes:
+            if texto and largo + len(texto) + 4 <= ancho:
+                der = ((texto, TENUE), ("  ", NORMAL))
+                break
+        pintar_fila(win, y, 0, ancho, izq, der)
+
+    @staticmethod
+    def _ventana(n, sitio, foco):
+        """(desde, hasta, antes, despues): qué filas de n caben en `sitio`
+        con `foco` a la vista; antes/despues dicen si hace falta un «…»."""
+        if n <= sitio:
+            return 0, n, False, False
+        desde = max(0, min(foco - sitio // 3, n - sitio))
+        hasta = desde + sitio
+        antes, despues = desde > 0, hasta < n
+        return desde + (1 if antes else 0), hasta - (1 if despues else 0), antes, despues
+
+    # ── lista para copiar ──
+    def _pintar_lista(self, app, y0, alto, ancho):
+        win = app.pantalla
         destino = self.montaje(app)
         y = y0
         if destino is None:
             escribir(win, y, 2, "No hay ninguna tarjeta montada.", ARENA)
+            fuera = app.ultima_expulsion
+            if fuera and fuera.get("ok"):
+                x = escribir(win, y + 2, 2, f"{OK} {fuera['etiqueta']} expulsada.", ESPUMA, True)
+                escribir(win, y + 2, x + 1, "Ya puedes sacar la tarjeta.", TENUE)
+                y += 2
             escribir(win, y + 2, 2,
                      "Conecta el FiiO o el lector de la microSD; aparece sola.", TENUE)
             escribir(win, y + 3, 2,
                      f"Se buscan sistemas FAT/exFAT en {fiio.donde_se_buscan()}.", TENUE)
-            y += 5
-        else:
-            for i, d in enumerate(app.datos.destinos):
-                elegido = i == self.destino
-                if elegido:
-                    pintar(win, y, 0, ancho, SEL)
-                    escribir(win, y, 0, "▎", AGUA)
-                escribir(win, y, 2, elipsis(d["montaje"], ancho - 34),
-                         BLANCO if elegido else NORMAL)
-                cola = (f"{d['tipo']}  {comun.formato_bytes(d['libre'])} libres "
-                        f"de {comun.formato_bytes(d['total'])}")
-                escribir(win, y, max(4, ancho - len(cola) - 2), cola, TENUE)
-                y += 1
-            y += 1
-            if destino["tipo"] not in ("vfat", "exfat", "msdos"):
-                escribir(win, y, 2, f"{AVISO} es {destino['tipo']}: no puedo verificar "
-                                    f"el orden físico de las entradas", ARENA)
-                y += 2
+            return
 
-        bytes_plan = sum(a["bytes"] for a in self.plan)
-        pistas = sum(len(a["pistas"]) for a in self.plan)
-        origen = "marcados" if app.marcados else "toda la biblioteca"
-        escribir(win, y, 2, rellenar("origen", 10), TENUE)
-        escribir(win, y, 12, elipsis(app.biblioteca.raiz, ancho - 14))
-        y += 1
-        escribir(win, y, 2, rellenar("plan", 10), TENUE)
-        if self.calculando:
-            escribir_trozos(win, y, 12, cargando("calculando…"))
+        reparto = self._reparto(app)
+        if reparto is None and (self.reparto is None
+                                or (self.calculado_para or (None,) * 3)[2] != destino["montaje"]):
+            reparto_visto = None          # aún no se sabe nada de esta tarjeta
         else:
-            escribir(win, y, 12, f"{len(self.plan)} álbumes · {pistas} pistas · "
-                                 f"{comun.formato_bytes(bytes_plan)}  ({origen})", BLANCO)
-        y += 1
-        if destino:
-            escribir(win, y, 2, rellenar("destino", 10), TENUE)
-            escribir(win, y, 12, elipsis(os.path.join(
-                destino["montaje"], fiio.DESTINO_REL_POR_DEFECTO), ancho - 14))
-            y += 1
-            libre = destino["libre"]
-            escribir(win, y, 2, rellenar("espacio", 10), TENUE)
-            ancho_barra = max(10, min(40, ancho - 34))
-            usado = 1 - (libre / destino["total"]) if destino["total"] else 0
-            barra(win, y, 12, ancho_barra, usado, ESPUMA if libre > bytes_plan else CORAL)
-            escribir(win, y, 12 + ancho_barra + 1,
-                     f"{comun.formato_bytes(libre)} libres", TENUE)
-            y += 1
-            if bytes_plan > libre:
-                escribir(win, y, 2, f"{MAL} no cabe: faltan "
-                                    f"{comun.formato_bytes(bytes_plan - libre)}", CORAL)
-                y += 1
-        y += 1
+            reparto_visto = reparto or self.reparto
+        nuevos = list((reparto_visto or {}).get("nuevos", []))
+        al_dia = list((reparto_visto or {}).get("al_dia", []))
+        otro_orden = list((reparto_visto or {}).get("otro_orden", []))
+        distintos = list((reparto_visto or {}).get("distintos", []))
+        bytes_copia = sum(a["bytes"] for a in nuevos)
+        pistas_copia = sum(len(a["pistas"]) for a in nuevos)
+        libre, total = destino["libre"], destino["total"]
+        falta = bytes_copia - libre
+        no_fat = destino["tipo"] not in ("vfat", "exfat", "msdos")
 
-        alto_lista = y0 + alto - y - 1
-        if alto_lista > 1 and self.plan:
-            escribir(win, y, 2, "se copiará en este orden", TENUE)
+        # Cuánto ocupa cada parte, para quitar huecos si no cabe todo.
+        caja_filas = 4 + (1 if app.marcados else 0)
+        abajo = (1 if al_dia else 0) + (1 if otro_orden else 0) + (1 if distintos else 0)
+        fijo = (len(app.datos.destinos) + (1 if no_fat else 0) + 2 + (1 if falta > 0 else 0)
+                + caja_filas + 2 + 1 + min(len(nuevos), 3) + abajo)
+        huecos = 4 if abajo else 3
+        holgado = fijo + huecos <= alto
+        hueco = 1 if holgado else 0     # sin sitio, tampoco hay blanco en la caja
+
+        # la tarjeta
+        for i, d in enumerate(app.datos.destinos):
+            elegida = i == self.destino
+            if elegida:
+                pintar(win, y, 0, ancho, SEL)
+            der = [(f"{d['tipo']} · {comun.formato_bytes(d['libre'])} libres de "
+                    f"{comun.formato_bytes(d['total'])}", TENUE), ("  ", NORMAL)]
+            pintar_fila(win, y, 0, ancho,
+                        [("▌" if elegida else " ", AGUA),
+                         (self.etiqueta(d), BLANCO if elegida else NORMAL),
+                         ("  conectada", ESPUMA)], der)
             y += 1
-            for i, item in enumerate(self.plan[self.desplazado:
-                                               self.desplazado + alto_lista - 1]):
-                escribir(win, y + i, 3, f"{self.desplazado + i + 1:>3}. ", TENUE)
-                escribir(win, y + i, 8, elipsis(item["rel"], ancho - 30))
-                cola = f"{len(item['pistas'])} pistas  {comun.formato_bytes(item['bytes'])}"
-                escribir(win, y + i, max(9, ancho - len(cola) - 2), cola, TENUE)
-            sobran = len(self.plan) - self.desplazado - (alto_lista - 1)
+        if no_fat:
+            escribir(win, y, 2, elipsis(f"{AVISO} es {destino['tipo']}: no puedo verificar "
+                                        f"el orden físico de las entradas", ancho - 4), ARENA)
+            y += 1
+        y += hueco
+
+        # el espacio: lo usado, esta copia (rayada) y lo que queda libre
+        ancho_barra = max(10, min(60, ancho - 14))
+        usado = max(0, total - libre)
+        if total:
+            celdas_usado = int(round(ancho_barra * usado / total))
+            celdas_copia = min(ancho_barra - celdas_usado,
+                               int(math.ceil(ancho_barra * bytes_copia / total)) if bytes_copia else 0)
+        else:
+            celdas_usado = celdas_copia = 0
+        x = escribir(win, y, 2, "espacio ", TENUE)
+        escribir_trozos(win, y, x, [
+            (BLOQUE * celdas_usado, TENUE),
+            ("▒" * celdas_copia, CORAL if falta > 0 else ARENA),
+            (VACIO * (ancho_barra - celdas_usado - celdas_copia), LINEA)])
+        y += 1
+        leyenda = [(f"usado {comun.formato_bytes(usado)}  ·  ", TENUE),
+                   (f"esta copia {comun.formato_bytes(bytes_copia)}", ARENA)]
+        if falta <= 0:
+            leyenda.append((f"  ·  quedarán {comun.formato_bytes(libre - bytes_copia)} libres",
+                            TENUE))
+        escribir_trozos(win, y, x, leyenda, ancho=ancho - x - 1)
+        y += 1
+        if falta > 0:
+            escribir(win, y, x, f"{MAL} no cabe: faltan {comun.formato_bytes(falta)}", CORAL)
+            y += 1
+        y += hueco
+
+        # la caja: qué falta copiar y la única acción
+        ancho_caja = max(30, min(66, ancho - 4))
+        filas = []
+        if reparto_visto is None:
+            filas.append(cargando("mirando qué hay en la tarjeta…"))
+            filas.append([])
+        elif not self.todos:
+            filas.append([("No hay álbumes que copiar en la biblioteca"
+                           + (" marcados" if app.marcados else ""), BLANCO)])
+            filas.append([])
+        elif nuevos:
+            filas.append([(self._plural(len(nuevos), "álbum nuevo", "álbumes nuevos")
+                           + " para copiar", BLANCO)])
+            datos = (f"{self._plural(pistas_copia, 'pista', 'pistas')} · "
+                     f"{comun.formato_bytes(bytes_copia)}")
+            velocidad = app.velocidades_fiio.get(self.etiqueta(destino))
+            if velocidad:
+                datos += f" · alrededor de {self._tiempo(bytes_copia / velocidad)}"
+            filas.append([(datos, TENUE)])
+        else:
+            filas.append([(f"{OK} La tarjeta está al día", ESPUMA)])
+            filas.append([("no hay nada nuevo que copiar", TENUE)])
+        if app.marcados:
+            filas.append([("solo lo marcado en Biblioteca · ", ARENA), ("m", AGUA),
+                          (" quita las marcas", TENUE)])
+        accion = None
+        if nuevos and falta > 0:
+            accion = [(f"{MAL} No cabe: libera {comun.formato_bytes(falta)} "
+                       f"o marca menos álbumes", CORAL)]
+        elif nuevos:
+            accion = [(" ↵  Empezar a copiar ", self._resalte(AGUA)),
+                      ("   o ", TENUE), ("n", AGUA), (" para ver el plan sin copiar", TENUE)]
+        if accion:
+            filas += ([[]] if holgado else []) + [accion]
+        y = self._caja(win, y, 2, ancho_caja, filas)
+        y += hueco
+
+        # por copiar, desplazable; lo que ya está y lo que hay que arreglar, abajo
+        fondo = y0 + alto - abajo - (hueco if abajo else 0)
+        ancho_fila = min(ancho - 4, 72)
+        if nuevos and fondo - y >= 2:
+            escribir(win, y, 2, "por copiar", TENUE)
+            y += 1
+            sitio = fondo - y
+            self.desplazado = max(0, min(self.desplazado, len(nuevos) - sitio))
+            visibles = nuevos[self.desplazado:self.desplazado + sitio]
+            sobran = len(nuevos) - self.desplazado - len(visibles)
             if sobran > 0:
-                escribir(win, y0 + alto - 1, 3, f"… y {sobran} más", TENUE)
+                visibles = visibles[:-1]
+                sobran += 1
+            for a in visibles:
+                der = [(f"{len(a['pistas']):>2} pistas  {comun.formato_bytes(a['bytes']):>9}",
+                        TENUE)]
+                pintar_fila(win, y, 4, ancho_fila - 2,
+                            [("+ ", ARENA), (self._nombre(a), NORMAL)], der)
+                y += 1
+            if sobran > 0:
+                texto = f"… y {sobran} más"
+                if len(app.datos.destinos) <= 1:
+                    texto += "  (↑↓ para verlos)"
+                escribir(win, y, 6, texto, TENUE)
+                y += 1
+            y += hueco
+        aviso = [("w", AGUA), (" los reescribe en orden", TENUE)]
+        if al_dia:
+            pintar_fila(win, y, 2, ancho_fila, [("ya en la tarjeta  ", TENUE),
+                        (f"{OK} {self._plural(len(al_dia), 'álbum', 'álbumes')}", ESPUMA)])
+            y += 1
+        if otro_orden:
+            pintar_fila(win, y, 2, ancho_fila, [("en otro orden     ", TENUE),
+                        (f"{AVISO} {self._plural(len(otro_orden), 'álbum', 'álbumes')}", ARENA)],
+                        aviso)
+            y += 1
+        if distintos:
+            pintar_fila(win, y, 2, ancho_fila, [("incompletos       ", TENUE),
+                        (f"{AVISO} {self._plural(len(distintos), 'álbum', 'álbumes')}", ARENA)],
+                        aviso)
+
+    # ── copiando ──
+    def _pintar_copiando(self, app, copia, y0, alto, ancho):
+        win = app.pantalla
+        t = time.monotonic()
+        holgado = alto >= 16
+        y = y0
+        en_juego = [a for a in copia.albumes if a["estado"] != "omitido"]
+        actual = copia.actual()
+
+        titulo = (f" {girador(t)} SIMULANDO " if copia.simulacion
+                  else f" {girador(t)} COPIANDO A {copia.etiqueta} ")
+        izq = [(titulo, self._resalte(AGUA)), ("  ", NORMAL)]
+        posicion = next((i for i, a in enumerate(en_juego) if a is actual), None)
+        if posicion is not None:
+            izq.append((f"álbum {posicion + 1} de {len(en_juego)}", BLANCO))
+            if copia.pista_indice:
+                izq += [(" · ", TENUE), (f"pista {copia.pista_indice} de "
+                                         f"{len(actual['pistas'])}", BLANCO)]
+        empezo = self._hora(copia.inicio)
+        termina = copia.termina()
+        if termina is not None:
+            fin = self._hora(termina)
+            variantes = (f"empezó {empezo} · termina ~{fin}", f"empezó {empezo} → ~{fin}",
+                         f"{empezo} → ~{fin}")
+        else:
+            variantes = (f"empezó {empezo}", empezo)
+        self._franja(win, y, ancho, izq, variantes)
+        y += 1 + (1 if holgado else 0)
+
+        # la barra del total
+        frac = copia.frac()
+        ancho_barra = max(10, ancho - 12)
+        barra(win, y, 2, ancho_barra, frac, AGUA,
+              vivo=copia.velocimetro.actual > 0, t=t)
+        escribir(win, y, 2 + ancho_barra + 2, f"{int(frac * 100):>3} %", AGUA, True)
+        y += 1
+        if copia.simulacion:
+            datos = [(f"{copia.pistas_hechas} de {copia.pistas_total} pistas · "
+                      "simulación: no se escribe nada", TENUE)]
+        else:
+            datos = [(f"{comun.formato_bytes(copia.hechos_bytes)} de "
+                      f"{comun.formato_bytes(copia.total_bytes)}", TENUE)]
+            velocidad = copia.velocidad() or copia.velocimetro.actual
+            if velocidad:
+                datos += [(" · ", TENUE), (f"{comun.formato_bytes(velocidad)}/s", BLANCO)]
+            restante = copia.restante()
+            if restante is not None:
+                datos.append((f" · quedan {self._tiempo(restante)}", TENUE))
+        escribir_trozos(win, y, 2, datos, ancho=ancho - 4)
+        y += 1 + (1 if holgado else 0)
+
+        # los álbumes como lista de tareas; el actual, abierto con sus pistas
+        filas, foco = [], 0
+        ancho_fila = min(ancho - 2, 74)
+        ancho_nombre = max(12, ancho_fila - 20)
+        ancho_pista = max(8, min(24, ancho_fila - 46))
+        for a in copia.albumes:
+            n = len(a["pistas"])
+            nombre = rellenar(self._nombre(a), ancho_nombre)
+            estado = a["estado"]
+            if estado == "copiado":
+                filas.append(([("  ✓ ", ESPUMA), (nombre, ESPUMA)],
+                               [(f"{a['hechas']:>2}/{n}  copiado", TENUE)], False))
+            elif estado == "omitido":
+                motivo = a["motivo"] or "omitido"
+                filas.append(([("  – ", TENUE), (nombre, TENUE)],
+                               [(motivo, TENUE if motivo == self.MOTIVO_AL_DIA else ARENA)],
+                               False))
+            elif estado in ("error", "abortado"):
+                filas.append(([(f"  {MAL} ", CORAL), (nombre, CORAL)],
+                               [(elipsis(a["motivo"] or estado, 30), CORAL)], False))
+            elif a is actual and estado == "copiando":
+                foco = len(filas)
+                filas.append(([("  ▸ ", AGUA), (nombre, BLANCO)],
+                               [(f"{a['hechas']:>2}/{n}", AGUA)], False))
+                for j, archivo in enumerate(a["pistas"]):
+                    texto = f"{j + 1:02d} {_sin_numero(archivo) if archivo else ''}"
+                    if j < a["hechas"]:
+                        filas.append(([("      ✓ ", ESPUMA), (texto, ESPUMA)], [], False))
+                    elif j == copia.pista_indice - 1:
+                        foco = len(filas)
+                        izq = [("      ▸ ", AGUA),
+                               (rellenar(texto, max(8, ancho_fila - 16 - ancho_pista)), BLANCO)]
+                        der = []
+                        if copia.pista_bytes:
+                            fp = min(1.0, copia.pista_hechos / copia.pista_bytes)
+                            der = (barra_trozos(ancho_pista, fp, AGUA, vivo=fp < 1, t=t)
+                                   + [(f" {int(fp * 100):>3} %", AGUA)])
+                        filas.append((izq, der, True))
+                    else:
+                        filas.append(([("        ", NORMAL), (texto, TENUE)], [], False))
+            else:
+                filas.append(([("  · ", TENUE), (nombre, TENUE)],
+                               [(f"{a['hechas']:>2}/{n}  en espera", TENUE)], False))
+
+        sitio = y0 + alto - y
+        desde, hasta, antes, despues = self._ventana(len(filas), sitio, foco)
+        if antes:
+            escribir(win, y, 4, f"… {desde} más arriba", TENUE)
+            y += 1
+        for izq, der, resaltada in filas[desde:hasta]:
+            if resaltada:
+                pintar(win, y, 0, ancho, SEL)
+            pintar_fila(win, y, 0, ancho_fila, izq, der)
+            y += 1
+        if despues:
+            escribir(win, y, 4, f"… {len(filas) - hasta} más", TENUE)
+
+    # ── terminada ──
+    def _pintar_terminada(self, app, copia, y0, alto, ancho):
+        win = app.pantalla
+        copiados = [a for a in copia.albumes if a["estado"] == "copiado"]
+        problemas = [a for a in copia.albumes
+                     if a["estado"] in ("error", "abortado") or a["orden_ok"] is False
+                     or (a["estado"] == "omitido" and a["motivo"] != self.MOTIVO_AL_DIA)]
+        sin_empezar = [a for a in copia.albumes if a["estado"] == "espera"]
+        fallos = any(a["estado"] == "error" for a in copia.albumes)
+
+        if copia.simulacion:
+            titulo, tono = ((f" {MAL} SIMULACIÓN CANCELADA ", ARENA) if copia.abortado
+                            else (f" {OK} SIMULACIÓN TERMINADA ", ESPUMA))
+        elif copia.abortado:
+            titulo, tono = f" {MAL} COPIA CANCELADA ", CORAL
+        elif fallos:
+            titulo, tono = f" {AVISO} COPIA TERMINADA CON ERRORES ", CORAL
+        else:
+            titulo, tono = f" {OK} COPIA TERMINADA ", ESPUMA
+        pistas = copia.pistas_hechas
+        peso = (sum(a["bytes"] for a in copiados) if copia.simulacion
+                else copia.hechos_bytes)
+        izq = [(titulo, self._resalte(tono)), ("  ", NORMAL),
+               (f"{self._plural(len(copiados), 'álbum', 'álbumes')} · "
+                f"{self._plural(pistas, 'pista', 'pistas')} · "
+                f"{comun.formato_bytes(peso)}", BLANCO),
+               (f" en {self._tiempo(copia.duracion())}", TENUE)]
+        inicio, fin = self._hora(copia.inicio), self._hora(copia.fin or time.time())
+        self._franja(win, y0, ancho, izq, (f"{inicio} → {fin}",))
+
+        # cuánto ocupa cada parte, para quitar huecos si no cabe
+        if copia.simulacion:
+            caja = [[("Era una simulación: no se escribió nada en la tarjeta.", BLANCO)],
+                    [],
+                    [(" ↵  Volver a la lista ", self._resalte(AGUA)),
+                     ("   para copiar de verdad", TENUE)]]
+        elif copia.expulsada:
+            caja = [[(f"{OK} {copia.etiqueta} expulsada.", ESPUMA),
+                     (" Ya puedes sacar la tarjeta.", TENUE)]]
+        elif app.expulsando:
+            caja = [cargando("sincronizando y desmontando la tarjeta…")]
+        elif copia.expulsada is False:
+            caja = [[(f"{MAL} No se pudo expulsar {copia.etiqueta}.", CORAL)],
+                    [],
+                    [(" u  Intentarlo otra vez ", self._resalte(ESPUMA)),
+                     ("   hace sync y la desmonta", TENUE)]]
+        else:
+            caja = [[("Ya puedes desconectar la FiiO.", BLANCO)],
+                    [],
+                    [(" u  Expulsar la tarjeta ", self._resalte(ESPUMA)),
+                     ("   hace sync y la desmonta", TENUE)]]
+        lista = copiados + problemas + sin_empezar
+        ayuda = 1 if (problemas or sin_empezar) and not copia.simulacion else 0
+        fijo = 1 + 1 + len(caja) + 2 + ayuda
+        holgado = fijo + 4 + min(len(lista), 3) <= alto
+        if not holgado:
+            caja = [fila for fila in caja if fila]
+        hueco = 1 if holgado else 0
+        y = y0 + 1 + hueco
+
+        bien = not (copia.abortado or fallos)
+        ancho_barra = max(10, ancho - 12)
+        frac = 1.0 if bien else copia.frac()
+        barra(win, y, 2, ancho_barra, frac, ESPUMA if bien else ARENA)
+        escribir(win, y, 2 + ancho_barra + 2, f"{int(frac * 100):>3} %",
+                 ESPUMA if bien else ARENA, True)
+        y += 1 + hueco
+
+        sitio = y0 + alto - y - (len(caja) + 2) - ayuda - (2 * hueco if ayuda else hueco)
+        ancho_fila = min(ancho - 2, 74)
+        ancho_nombre = max(12, ancho_fila - 20)
+        filas = []
+        for a in copiados:
+            if a["orden_ok"] is False:
+                continue
+            filas.append(([(f"  {OK} ", ESPUMA), (rellenar(self._nombre(a), ancho_nombre), ESPUMA)],
+                          [(self._plural(a["hechas"], "pista", "pistas"), TENUE)]))
+        for a in problemas:
+            if a["estado"] == "abortado" and copia.simulacion:
+                motivo = f"se paró tras {a['hechas']} de {len(a['pistas'])} pistas"
+            elif a["estado"] == "abortado":
+                motivo = f"a medias: {a['hechas']} de {len(a['pistas'])} pistas"
+            elif a["orden_ok"] is False:
+                motivo = "quedó en otro orden"
+            else:
+                motivo = a["motivo"] or a["estado"]
+            filas.append(([(f"  {MAL} ", CORAL), (rellenar(self._nombre(a), ancho_nombre), CORAL)],
+                          [(motivo, CORAL)]))
+        for a in sin_empezar:
+            filas.append(([("  · ", TENUE), (rellenar(self._nombre(a), ancho_nombre), TENUE)],
+                          [("no se copió", TENUE)]))
+        if sitio > 0:
+            visibles = filas[:sitio]
+            if len(filas) > sitio:
+                visibles = filas[:sitio - 1]
+            for izq, der in visibles:
+                # si el motivo es largo, el nombre cede sitio (hasta 12)
+                largo_der = sum(len(t) for t, _c in der)
+                nombre = izq[1][0].rstrip()
+                cabe = max(12, min(ancho_nombre, ancho - 2 - 4 - 1 - largo_der))
+                izq = [izq[0], (rellenar(nombre, cabe), izq[1][1])]
+                pintar_fila(win, y, 0, min(ancho - 2, max(ancho_fila, 4 + cabe + 1 + largo_der)),
+                            izq, der)
+                y += 1
+            if len(filas) > len(visibles):
+                escribir(win, y, 4, f"… y {len(filas) - len(visibles)} más", TENUE)
+                y += 1
+        if ayuda:
+            y += hueco
+            que = []
+            if any(a["estado"] in ("abortado", "error") for a in problemas):
+                que.append("a medias")
+            if any(a["orden_ok"] is False or a["estado"] == "omitido" for a in problemas):
+                que.append("en otro orden")
+            consejo = [("↵", AGUA), (" vuelve para copiar lo que falte", CORAL)]
+            if que:
+                consejo += [("  ·  ", TENUE), ("w", AGUA),
+                            (" reescribe lo que quedó " + " o ".join(que), CORAL)]
+            escribir_trozos(win, y, 2, consejo, ancho=ancho - 4)
+            y += 1
+        y += hueco
+        self._caja(win, y, 2, max(30, min(66, ancho - 4)), caja)
 
     @staticmethod
     def panel_trabajo(app, y0, alto, ancho):
@@ -2805,23 +3338,40 @@ class VistaFiio(Vista):
             escribir(win, y0 + alto - 1, 2, elipsis(texto, ancho - 4), ESPUMA)
 
     def tecla(self, app, k):
-        if app.trabajo.activo:
-            if k == "x":
+        if self._copiando_ahora(app) is not None:
+            if k in ("\x1b", "x"):
                 app.trabajo.cancelar.set()
-                app.avisar("abortando tras la pista en curso…", ARENA)
+                app.avisar("cancelando: termina la pista en curso y para…", ARENA)
                 return True
             return False
 
+        terminada = self._terminada(app)
         if k == curses.KEY_UP:
-            self.destino = max(0, self.destino - 1)
+            if len(app.datos.destinos) > 1:
+                self.destino = max(0, self.destino - 1)
+            else:
+                self.desplazado = max(0, self.desplazado - 1)
         elif k == curses.KEY_DOWN:
-            self.destino = min(max(0, len(app.datos.destinos) - 1), self.destino + 1)
+            if len(app.datos.destinos) > 1:
+                self.destino = min(len(app.datos.destinos) - 1, self.destino + 1)
+            else:
+                self.desplazado += 1
+        elif k == curses.KEY_PPAGE:
+            self.desplazado = max(0, self.desplazado - 10)
+        elif k == curses.KEY_NPAGE:
+            self.desplazado += 10
         elif k in ("\n", "\r", curses.KEY_ENTER, "c"):
-            self._pedir_copia(app, rehacer=False)
+            if terminada is not None:
+                # «copiar otra vez»: de vuelta a la lista, mirada de nuevo
+                self.cerrada = terminada
+                self.desplazado = 0
+                self.calcular(app)
+            else:
+                self._pedir_copia(app, rehacer=False)
         elif k == "w":
             self._pedir_copia(app, rehacer=True)
-        elif k == "n":
-            app.copiar_fiio(self.montaje(app), self.plan, simular=True, rehacer=False)
+        elif k == "n" and terminada is None:
+            self._simular(app)
         elif k == "m":
             app.marcados.clear()
             self.calcular(app)
@@ -2834,26 +3384,64 @@ class VistaFiio(Vista):
             return False
         return True
 
-    def _pedir_copia(self, app, rehacer):
-        destino = self.montaje(app)
+    def _listos(self, app, destino):
+        """El reparto de ahora, o None tras avisar de por qué no lo hay."""
         if destino is None:
             app.avisar("no hay ninguna tarjeta montada", CORAL)
+            return None
+        reparto = self._reparto(app)
+        if reparto is None:
+            self.calcular(app)
+            app.avisar("un momento: estoy mirando qué hay en la tarjeta", ARENA)
+        return reparto
+
+    def _simular(self, app):
+        destino = self.montaje(app)
+        reparto = self._listos(app, destino)
+        if reparto is None:
             return
-        if not self.plan:
-            app.avisar("no hay nada que copiar", ARENA)
+        if not reparto["nuevos"]:
+            app.avisar("no hay nada nuevo que copiar", ESPUMA)
             return
-        bytes_plan = sum(a["bytes"] for a in self.plan)
-        if bytes_plan > destino["libre"]:
-            app.avisar(f"no cabe: faltan "
-                       f"{comun.formato_bytes(bytes_plan - destino['libre'])}", CORAL)
+        app.copiar_fiio(destino, list(reparto["nuevos"]), simular=True, rehacer=False)
+
+    def _pedir_copia(self, app, rehacer):
+        """↵ (rehacer=False) copia sin preguntar los álbumes que aún no están:
+        no pisa nada. w (rehacer=True) reescribe, tras confirmar, los que
+        están en otro orden o incompletos, porque antes los borra de la
+        tarjeta. La paleta llama aquí con los mismos argumentos."""
+        destino = self.montaje(app)
+        reparto = self._listos(app, destino)
+        if reparto is None:
             return
-        pregunta = (f"¿Copiar {len(self.plan)} álbumes "
-                    f"({comun.formato_bytes(bytes_plan)}) a {destino['montaje']}?")
-        if rehacer:
-            pregunta += "  Se BORRAN y reescriben los que ya estén."
+        libre = destino["libre"]
+        if not rehacer:
+            albumes = list(reparto["nuevos"])
+            if not albumes:
+                app.avisar("la tarjeta está al día: no hay nada nuevo que copiar", ESPUMA)
+                return
+            falta = sum(a["bytes"] for a in albumes) - libre
+            if falta > 0:
+                app.avisar(f"no cabe: faltan {comun.formato_bytes(falta)}", CORAL)
+                return
+            app.copiar_fiio(destino, albumes, simular=False, rehacer=False)
+            return
+
+        albumes = self._arreglar(reparto)
+        if not albumes:
+            app.avisar("no hay nada en otro orden ni incompleto", ESPUMA)
+            return
+        peso = sum(a["bytes"] for a in albumes)
+        falta = peso - sum(self.en_tarjeta.get(a["rel"], 0) for a in albumes) - libre
+        if falta > 0:
+            app.avisar(f"no cabe: faltan {comun.formato_bytes(falta)}", CORAL)
+            return
+        pregunta = (f"¿Reescribir {self._plural(len(albumes), 'álbum', 'álbumes')} "
+                    f"({comun.formato_bytes(peso)}) en {self.etiqueta(destino)}? "
+                    f"Primero se BORRAN de la tarjeta y luego se copian otra vez en orden.")
         app.abrir(OverlayConfirmar(
             pregunta,
-            lambda: app.copiar_fiio(destino, self.plan, simular=False, rehacer=rehacer)))
+            lambda: app.copiar_fiio(destino, albumes, simular=False, rehacer=True)))
 
 
 class VistaLog(Vista):
@@ -4452,10 +5040,12 @@ class App:
         largo = sum(len(n) + 2 for n, _p, _c in partes) + 3 * len(partes) + len(reloj)
 
         # Mientras se copia de verdad a la tarjeta, se ve desde cualquier
-        # pestaña: «FiiO ▮▮▮▮▯▯▯▯ 40 %», a la izquierda de los indicadores.
+        # otra pestaña: «FiiO ▮▮▮▮▯▯▯▯ 40 %», a la izquierda de los
+        # indicadores. En la del FiiO ya lo dice la franja.
         progreso = []
         copia = self.trabajo.copia if self.trabajo.activo else None
-        if copia is not None and not copia.simulacion:
+        if (copia is not None and not copia.simulacion
+                and not isinstance(self.vista(), VistaFiio)):
             frac = copia.frac()
             porcentaje = (f" {int(frac * 100)} %", AGUA)
             completo = ([("FiiO ", TENUE)]

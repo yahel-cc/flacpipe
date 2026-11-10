@@ -91,6 +91,13 @@ def _fiio_falso(mb_s, tarjeta=None):
 
     fiio.copiar = copiar
 
+    def desmontar(montaje, informar=print):
+        """Expulsar de mentira: nunca llama a sync ni a udisksctl."""
+        informar(f"{montaje} desmontada (de mentira)")
+        return True
+
+    fiio.desmontar = desmontar
+
 
 def _volcar_json(numero):
     """El cuadro tal cual quedó en el lienzo: carácter, frente, fondo y estilo

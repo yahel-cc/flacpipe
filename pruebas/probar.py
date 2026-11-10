@@ -481,7 +481,9 @@ ALBUMES_DE_MUESTRA = [
 
 def fiio_prueba(cols, filas, etiqueta):
     """Cuatro álbumes y una tarjeta con uno completo y otro con una pista menos:
-    2 nuevos, 1 al día y 1 por arreglar."""
+    2 nuevos, 1 al día y 1 por arreglar. Recorre las tres pantallas (lista,
+    copiando, terminada) y expulsa; luego la lista con 8 colores y la lista y
+    la copia a 78x20. Los dos álbumes que ya estaban no se tocan."""
     albumes = [
         ("CASIOPEA", "Mint Jams", ["Take Me", "Asayake", "Midnight Rendezvous", "Time Limit"]),
         ("Nujabes", "Modal Soul", ["Feather", "Ordinary Joe", "Reflection Eternal",
@@ -502,17 +504,66 @@ def fiio_prueba(cols, filas, etiqueta):
         for pista in pistas[:len(pistas) - quitar]:
             with open(os.path.join(destino, pista), "wb") as f:
                 f.write(b"fLaC")
-    s = con_biblioteca(raiz, lambda: Sesion(f"fiio-{etiqueta}", cols, filas,
-                                            {"fiio_falso": True, "fiio_tarjeta": tarjeta}))
+
+    def foto():
+        return sorted((os.path.relpath(os.path.join(dp, f), tarjeta),
+                       os.stat(os.path.join(dp, f)).st_mtime_ns)
+                      for dp, _ds, fs in os.walk(tarjeta) for f in fs)
+
+    def esperar(sesion, texto, tope=30.0):
+        """Hasta que la pantalla diga `texto` (la copia de mentira tarda)."""
+        pantalla = os.path.join(sesion.salida, "pantalla.txt")
+        fin = time.monotonic() + tope
+        while time.monotonic() < fin:
+            try:
+                with open(pantalla, encoding="utf-8") as f:
+                    if texto in f.read():
+                        return True
+            except OSError:
+                pass
+            time.sleep(0.3)
+        print(f"!! {sesion.nombre}: no apareció «{texto}» en {tope:.0f} s")
+        return False
+
+    antes = foto()
+    # a 40 MB/s la copia de mentira dura unos 10 s: da tiempo a verla a medias
+    escenario = {"fiio_falso": True, "fiio_tarjeta": tarjeta, "fiio_mb_s": 40}
+    s = con_biblioteca(raiz, lambda: Sesion(f"fiio-{etiqueta}", cols, filas, escenario))
     s.teclas("3")
-    s.capturar("plan", espera=1.5)
-    s.teclas("\r")
-    s.capturar("confirmar", espera=0.5)
-    s.teclas("s")
+    esperar(s, "para copiar")
+    s.capturar("lista", espera=0.5)
+    s.teclas("\r")                      # sin confirmar: no pisa nada
     s.capturar("copiando-1", espera=1.5)
     s.capturar("copiando-2", espera=3.0)
-    s.capturar("copiando-3", espera=4.0)
+    esperar(s, "COPIA TERMINADA")
+    s.capturar("terminada", espera=0.5)
+    s.teclas("u")
+    esperar(s, "expulsada.", tope=5)
+    s.capturar("expulsada", espera=0.5)
+    s.teclas("\r")                      # copiar otra vez: de vuelta a la lista
+    s.capturar("otra-vez", espera=1.5)
     s.cerrar()
+
+    s = con_biblioteca(raiz, lambda: Sesion("fiio-xterm", cols, filas, escenario, term="xterm"))
+    s.teclas("3")
+    esperar(s, "para copiar")
+    s.capturar("lista", espera=0.5)
+    s.cerrar()
+
+    s = con_biblioteca(raiz, lambda: Sesion("fiio-chica", 78, 20, escenario))
+    s.teclas("3")
+    esperar(s, "para copiar")
+    s.capturar("lista", espera=0.5)
+    s.teclas("\r")
+    s.capturar("copiando", espera=3.0)
+    s.cerrar()
+
+    despues = foto()
+    if despues != antes:
+        FALLOS.append("fiio-tarjeta")
+        print("!! la tarjeta de mentira cambió:", sorted(set(antes) ^ set(despues)))
+    else:
+        print(f"   tarjeta intacta: {len(antes)} archivos, mismas fechas")
 
 
 def heredar(cols, filas, etiqueta):
@@ -563,10 +614,8 @@ def fiio_cabecera():
                                                 {"fiio_falso": True}))
         s.teclas("3")
         s.capturar(f"plan-{etiqueta}", espera=1.5)
-        s.teclas("\r")
-        s.capturar(f"confirmar-{etiqueta}", espera=0.5)
-        s.teclas("s")
-        time.sleep(1.0)
+        s.teclas("\r")                  # ↵ copia sin preguntar
+        s.capturar(f"fiio-{etiqueta}", espera=1.0)
         s.teclas("1")
         s.capturar(etiqueta, espera=1.0)
         s.cerrar()
