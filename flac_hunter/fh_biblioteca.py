@@ -446,3 +446,40 @@ def mover_a_heredada(albumes, raiz=None, informar=print):
         except OSError:
             pass
     return resumen
+
+
+def borrar_carpetas(carpetas, raiz, informar=print):
+    """Borra del disco carpetas de artista o de álbum de la biblioteca.
+
+    Sólo borra lo que está dentro de `raiz` (nunca la raíz misma ni las
+    carpetas internas como .pipeline o .descargas). Si al borrar un álbum la
+    carpeta del artista queda vacía, también se borra.
+    """
+    raiz_real = os.path.realpath(raiz)
+    resumen = {"borrados": 0, "errores": []}
+    for carpeta in carpetas:
+        real = os.path.realpath(carpeta)
+        rel = os.path.relpath(real, raiz_real)
+        partes = rel.split(os.sep)
+        if (rel in (".", "") or partes[0] == ".." or os.path.isabs(rel)
+                or partes[0] in comun.NO_SON_ARTISTAS
+                or partes[0].startswith(".")):
+            informar(f"  ✗ {carpeta} — fuera de la biblioteca; no se toca")
+            resumen["errores"].append(f"{carpeta}: fuera de la biblioteca")
+            continue
+        try:
+            shutil.rmtree(real)
+        except OSError as error:
+            informar(f"  ✗ {rel} — {error}")
+            resumen["errores"].append(f"{rel}: {error}")
+            continue
+        informar(f"  ✓ {rel} borrado")
+        resumen["borrados"] += 1
+        padre = os.path.dirname(real)
+        if os.path.realpath(padre) != raiz_real:
+            try:
+                if not os.listdir(padre):
+                    os.rmdir(padre)
+            except OSError:
+                pass
+    return resumen

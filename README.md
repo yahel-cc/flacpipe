@@ -233,6 +233,7 @@ Tres columnas: artistas → álbumes → pistas.
 | `r` | releer la biblioteca del disco ahora, sin esperar a que se relea sola |
 | `b` | cambiar entre la biblioteca nueva (`~/Música`) y la heredada (`~/Música/Artistas`). Sólo cambia lo que ves; no mueve nada. El cursor vuelve al principio |
 | `h` | **mover** a la heredada, la carpeta que comparte Nicotine+. Mueve lo marcado; si no hay marcas, el artista entero cuando el cursor está en la columna de artistas, o el álbum del cursor en las otras. Pide confirmación, no pisa un álbum que ya esté en la heredada y borra la carpeta del artista en la nueva si queda vacía. Lo movido deja de salir en la biblioteca nueva y en la copia normal a la FiiO: para copiarlo, cambia antes con `b` a la heredada. Mirando la heredada, `h` no hace nada |
+| `d` o `Supr` | **borrar** del disco. Con álbumes marcados, borra sólo esos, sin preguntar. Sin marcas, borra la carpeta entera del cursor (el artista en la columna de artistas, el álbum en las otras) y antes pregunta «¿Estás seguro de borrar todo en la carpeta…?» con `s` sí / `n` no. Si la carpeta del artista queda vacía, también se va. No se puede deshacer |
 | `o` | organizar `.descargas`, igual que en la Cola. Te lleva a la Cola para ver el progreso |
 
 #### 3 · FiiO

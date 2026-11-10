@@ -1389,6 +1389,7 @@ class Reproductor:
                 break
         self.proceso = None
         self.titulo = ""
+        self.ruta = ""
         self.duracion = 0.0
         self.inicio = 0.0
 
@@ -1420,6 +1421,7 @@ class Reproductor:
         except OSError as error:
             return f"no se pudo reproducir: {error}"
         self.titulo = titulo or os.path.basename(ruta)
+        self.ruta = ruta
         self.duracion = biblioteca.leer_streaminfo(ruta).get("duracion", 0) or 0
         self.inicio = time.monotonic()
         return None
@@ -2084,6 +2086,7 @@ class VistaBiblioteca(Vista):
                   ("b", "nueva" if app.biblioteca.heredada else "heredada")]
         if not app.biblioteca.heredada:
             pares.append(("h", "pasar a heredada"))
+        pares.append(("d", "borrar"))
         return pares
 
     def dibujar(self, app, y0, alto, ancho):
@@ -2242,9 +2245,44 @@ class VistaBiblioteca(Vista):
             app.organizar()
         elif k == "h":
             self._pedir_heredar(app)
+        elif k in ("d", curses.KEY_DC):
+            self._pedir_borrar(app)
         else:
             return False
         return True
+
+    def _pedir_borrar(self, app):
+        """d: borra lo marcado sin preguntar. Sin marcas, borra la carpeta entera
+        del cursor (el artista en la columna de artistas, el álbum en las otras)
+        y antes pregunta."""
+        bib = app.biblioteca
+        if app.marcados:
+            albumes = [item for a in bib.artistas for item in a["albumes"]
+                       if item["rel"] in app.marcados]
+            if not albumes:
+                app.avisar("lo marcado no está en esta biblioteca", ARENA)
+                return
+            app.borrar_carpetas([a["dir"] for a in albumes], [a["rel"] for a in albumes])
+            return
+        if self.columna == 0:
+            artista = self.artista(app)
+            if not artista:
+                app.avisar("no hay nada que borrar", ARENA)
+                return
+            carpeta = os.path.join(bib.raiz, artista["nombre"])
+            nombre, albumes = artista["nombre"], artista["albumes"]
+        else:
+            item = self.album(app)
+            if not item:
+                app.avisar("no hay nada que borrar", ARENA)
+                return
+            carpeta, nombre, albumes = item["dir"], item["rel"], [item]
+        peso = comun.formato_bytes(sum(a["bytes"] for a in albumes))
+        pistas = sum(len(a["pistas"]) for a in albumes)
+        app.abrir(OverlayConfirmar(
+            f"¿Estás seguro de borrar todo en la carpeta «{nombre}»? "
+            f"{len(albumes)} álbum(es), {pistas} pista(s), {peso}. No se puede deshacer.",
+            lambda: app.borrar_carpetas([carpeta], [a["rel"] for a in albumes])))
 
     def a_heredar(self, app):
         """Lo que movería h: los marcados, o el artista entero si el cursor está
@@ -3414,6 +3452,31 @@ class App:
             return resumen
 
         self.trabajo.lanzar("pasando a la heredada", tarea, clase="organizar")
+
+    def borrar_carpetas(self, carpetas, rels):
+        if self.trabajo.activo:
+            self.avisar("ya hay una tarea en curso", ARENA)
+            return
+        # si suena algo de lo que se va a borrar, se para antes
+        sonando = self.reproductor.ruta if self.reproductor.sonando else ""
+        if sonando and any(sonando.startswith(c.rstrip(os.sep) + os.sep) for c in carpetas):
+            self.reproductor.parar()
+        raiz = self.biblioteca.raiz
+
+        def tarea(trabajo):
+            trabajo.registrar(f"▸ borrando {len(carpetas)} carpeta(s)")
+            resumen = biblioteca.borrar_carpetas(carpetas, raiz, informar=trabajo.registrar)
+            for rel in rels:
+                self.marcados.discard(rel)
+            self.biblioteca.cargar()
+            if resumen["errores"]:
+                self.avisar(f"{len(resumen['errores'])} error(es) al borrar; "
+                            f"mira la Cola", CORAL, 6)
+            else:
+                self.avisar(f"{resumen['borrados']} carpeta(s) borrada(s)", ESPUMA)
+            return resumen
+
+        self.trabajo.lanzar("borrando", tarea, clase="organizar")
 
     @staticmethod
     def _agrupar_sueltos(trabajo, sueltos):
