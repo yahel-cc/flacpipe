@@ -405,9 +405,30 @@ ALBUMES_DE_MUESTRA = [
 
 
 def fiio_prueba(cols, filas, etiqueta):
-    raiz = biblioteca_de_mentira(os.path.join(SALIDA, "biblioteca-fiio"), ALBUMES_DE_MUESTRA)
+    """Cuatro álbumes y una tarjeta con uno completo y otro con una pista menos:
+    2 nuevos, 1 al día y 1 por arreglar."""
+    albumes = [
+        ("CASIOPEA", "Mint Jams", ["Take Me", "Asayake", "Midnight Rendezvous", "Time Limit"]),
+        ("Nujabes", "Modal Soul", ["Feather", "Ordinary Joe", "Reflection Eternal",
+                                   "Luv(sic) pt3", "Music Is Mine"]),
+        ("Tom Misch", "Geography", ["Before Paris", "Lost in Paris", "South of the River",
+                                    "Movie", "Tick Tock"]),
+        ("Khruangbin", "Con Todo El Mundo", ["Cómo Me Quieres", "Evan Finds the Third Room",
+                                             "Shades of Man", "A Hymn"]),
+    ]
+    raiz = biblioteca_de_mentira(os.path.join(SALIDA, "biblioteca-fiio"), albumes)
+    tarjeta = os.path.join(SALIDA, "fiio_tarjeta")
+    shutil.rmtree(tarjeta, ignore_errors=True)
+    for (artista, album, _t), quitar in ((albumes[0], 0), (albumes[1], 1)):
+        origen = os.path.join(raiz, artista, album)
+        destino = os.path.join(tarjeta, "Artistas", artista, album)
+        os.makedirs(destino)
+        pistas = sorted(os.listdir(origen))
+        for pista in pistas[:len(pistas) - quitar]:
+            with open(os.path.join(destino, pista), "wb") as f:
+                f.write(b"fLaC")
     s = con_biblioteca(raiz, lambda: Sesion(f"fiio-{etiqueta}", cols, filas,
-                                            {"fiio_falso": True}))
+                                            {"fiio_falso": True, "fiio_tarjeta": tarjeta}))
     s.teclas("3")
     s.capturar("plan", espera=1.5)
     s.teclas("\r")

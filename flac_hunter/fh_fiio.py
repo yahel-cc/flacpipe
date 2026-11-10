@@ -286,6 +286,39 @@ def _orden_es_observable(ruta):
     return _tipo_sistema(ruta) in SISTEMAS_FAT
 
 
+def clasificar(destino_raiz, albumes):
+    """Reparte los álbumes según lo que ya hay en la tarjeta, sin escribir nada.
+
+    Devuelve {"nuevos", "al_dia", "otro_orden", "distintos"}, cada uno una lista
+    de los mismos diccionarios de `albumes`, en su orden:
+      nuevos      no hay carpeta del álbum en la tarjeta
+      al_dia      están todas las pistas y en orden
+      otro_orden  están todas pero el orden físico no coincide (sólo observable
+                  en FAT/exFAT; en ext4/btrfs nunca pasa)
+      distintos   copia incompleta o con otras pistas (en cualquier sistema)
+    Es barata: un listdir por carpeta de álbum existente en la tarjeta.
+    """
+    reparto = {"nuevos": [], "al_dia": [], "otro_orden": [], "distintos": []}
+    observable = None
+    for item in albumes:
+        dir_destino = os.path.join(destino_raiz, item["artista"], item["album"])
+        if not os.path.isdir(dir_destino):
+            reparto["nuevos"].append(item)
+            continue
+        esperado = list(item["pistas"])
+        actual = _orden_fisico(dir_destino)
+        if actual == esperado:
+            reparto["al_dia"].append(item)
+            continue
+        if sorted(actual) != sorted(esperado):
+            reparto["distintos"].append(item)
+            continue
+        if observable is None:
+            observable = _orden_es_observable(dir_destino)
+        reparto["otro_orden" if observable else "al_dia"].append(item)
+    return reparto
+
+
 def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
            evento=None, cancelado=None):
     """Copia secuencialmente los álbumes indicados. Devuelve un resumen.
@@ -325,14 +358,13 @@ def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
         esperado = list(item["pistas"])
 
         if existe and not rehacer:
-            actual = _orden_fisico(dir_destino)
-            if actual == esperado or (not _orden_es_observable(dir_destino)
-                                      and sorted(actual) == sorted(esperado)):
+            clase = next(k for k, v in clasificar(destino_raiz, [item]).items() if v)
+            if clase == "al_dia":
                 informar(f"  » {item['rel']} — ya está y en orden")
                 _ev(t="omitido", rel=item["rel"], motivo="ya está y en orden")
                 resumen["omitidos"] += 1
                 continue
-            if sorted(actual) == sorted(esperado):
+            if clase == "otro_orden":
                 informar(f"  ! {item['rel']} — están todas pero el orden físico no coincide")
                 _ev(t="omitido", rel=item["rel"], motivo="el orden físico no coincide")
                 resumen["desordenados"].append(item["rel"])

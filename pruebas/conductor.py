@@ -35,21 +35,35 @@ def preparar(escenario):
     if escenario.get("nicotine_vivo"):
         comun.pid_nicotine = lambda: 424242
     if escenario.get("fiio_falso"):
-        _fiio_falso(escenario.get("fiio_mb_s", 66))
+        _fiio_falso(escenario.get("fiio_mb_s", 66), escenario.get("fiio_tarjeta"))
 
 
-def _fiio_falso(mb_s):
+def _fiio_falso(mb_s, tarjeta=None):
+    """`tarjeta` es una carpeta real que hace de montaje, para que clasificar
+    vea álbumes de verdad; sin ella la tarjeta falsa está vacía."""
     fiio = tui.fiio
     fiio.detectar_destinos = lambda: [{
-        "montaje": "/run/media/yahel/SNOWSKY", "dispositivo": "/dev/loop9", "tipo": "vfat",
+        "montaje": tarjeta or "/run/media/yahel/SNOWSKY", "dispositivo": "/dev/loop9", "tipo": "vfat",
         "libre": 27_400_000_000, "total": 32_000_000_000, "etiqueta": "SNOWSKY"}]
     bloque = 2_000_000
     pausa = bloque / (mb_s * 1_000_000)
 
     def copiar(destino_raiz, albumes, simular=False, rehacer=False, informar=print,
                evento=None, cancelado=None):
-        resumen = {"copiados": 0, "archivos": 0, "bytes": 0, "errores": []}
+        resumen = {"copiados": 0, "omitidos": 0, "archivos": 0, "bytes": 0,
+                   "desordenados": [], "errores": [], "abortado": False}
+        hay = fiio.clasificar(destino_raiz, albumes)
+        motivos = {"al_dia": "ya está y en orden", "otro_orden": "el orden físico no coincide",
+                   "distintos": "copia incompleta o distinta"}
+        omitir = {a["rel"]: motivos[k] for k in motivos for a in hay[k]} if not rehacer else {}
         for a in albumes:
+            if a["rel"] in omitir:
+                evento({"t": "omitido", "rel": a["rel"], "motivo": omitir[a["rel"]]})
+                if omitir[a["rel"]] == motivos["al_dia"]:
+                    resumen["omitidos"] += 1
+                else:
+                    resumen["desordenados"].append(a["rel"])
+                continue
             informar(f"▸ {a['rel']}")
             evento({"t": "album", "rel": a["rel"], "pistas": len(a["pistas"]),
                     "bytes": a["bytes"]})
