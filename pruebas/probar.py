@@ -528,6 +528,25 @@ def heredar(cols, filas, etiqueta):
             print("   ", os.path.relpath(os.path.join(dp, f), raiz))
 
 
+def fiio_cabecera():
+    """Con una copia de verdad en marcha (tarjeta de mentira), la cabecera
+    enseña «FiiO ▮▮▮ NN %» también desde la Cola: a 120 columnas y a 78."""
+    raiz = biblioteca_de_mentira(os.path.join(SALIDA, "biblioteca-cabecera"),
+                                 ALBUMES_DE_MUESTRA)
+    for cols, filas, etiqueta in ((120, 40, "cola"), (78, 20, "chica")):
+        s = con_biblioteca(raiz, lambda: Sesion("fiio-cabecera", cols, filas,
+                                                {"fiio_falso": True}))
+        s.teclas("3")
+        s.capturar(f"plan-{etiqueta}", espera=1.5)
+        s.teclas("\r")
+        s.capturar(f"confirmar-{etiqueta}", espera=0.5)
+        s.teclas("s")
+        time.sleep(1.0)
+        s.teclas("1")
+        s.capturar(etiqueta, espera=1.0)
+        s.cerrar()
+
+
 def terminar_descarga(esc):
     """La descarga simulada acaba: la petición pasa a lista con su resultado."""
     cola = json.load(open(esc["_cola"]))
@@ -600,6 +619,7 @@ if __name__ == "__main__":
         falso(78, 18, "chica")
     if que in ("fiio", "todo"):
         fiio_prueba(120, 40, "media")
+        fiio_cabecera()
     if que in ("importar", "todo"):
         importar(120, 40, "media")
         importar(78, 20, "chica")

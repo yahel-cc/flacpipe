@@ -1285,6 +1285,261 @@ class Datos:
 class Trabajo:
     """Una tarea larga (copiar al FiiO, organizar) corriendo en un hilo."""
 
+    class Copia:
+        """Todo lo que se sabe de una copia a la tarjeta, álbum por álbum y
+        pista por pista. Lo llena copiar_fiio con el plan antes de lanzar el
+        hilo, lo mueven los eventos de fiio.copiar() y, cuando el hilo acaba,
+        se queda en app.ultima_copia (expulsar no lo toca).
+
+        Cada álbum es un dict con rel, artista, album, pistas (nombres),
+        bytes, bytes_hechos, estado (ESTADOS), hechas (pistas escritas),
+        orden_ok (None si no se pudo mirar) y motivo (por qué se omitió,
+        falló o se paró)."""
+
+        ESTADOS = ("espera", "copiando", "copiado", "omitido", "error", "abortado")
+        # Segundos de muestras que hacen falta antes de prometer un final
+        MUESTRAS_MINIMAS_S = 2.0
+
+        def __init__(self, albumes, simulacion=False, rehacer=False, etiqueta="",
+                     montaje=""):
+            self.albumes = []
+            for a in albumes:
+                self.albumes.append({
+                    "rel": a["rel"],
+                    "artista": a.get("artista", ""),
+                    "album": a.get("album", ""),
+                    "pistas": [p if isinstance(p, str) else p.get("archivo", str(p))
+                               for p in a.get("pistas", [])],
+                    "bytes": a.get("bytes", 0),
+                    "bytes_hechos": 0,
+                    "estado": "espera",
+                    "hechas": 0,
+                    "orden_ok": None,
+                    "motivo": "",
+                })
+            self._por_rel = {a["rel"]: i for i, a in enumerate(self.albumes)}
+            self.simulacion = simulacion
+            self.rehacer = rehacer
+            self.etiqueta = etiqueta
+            self.montaje = montaje
+            self.album_indice = -1     # el álbum en curso, índice en albumes
+            self.pista = ""
+            self.pista_indice = 0      # 1..n dentro del álbum; 0 = ninguna aún
+            self.pista_bytes = 0
+            self.pista_hechos = 0
+            self.hechos_bytes = 0
+            self.velocimetro = Velocimetro(intervalo=0.4)
+            self.inicio = time.time()  # hora de reloj, para «empezó HH:MM»
+            self.fin = None
+            self._t0 = time.monotonic()
+            self._t1 = None
+            self.errores = []          # [{"rel", "error"}]
+            self.abortado = False
+            self.resumen = None        # lo que devolvió fiio.copiar()
+            self.expulsada = None      # True/False tras intentar expulsar
+
+        # ── lo que se lee al pintar ──
+        @property
+        def terminada(self):
+            return self.fin is not None
+
+        def actual(self):
+            """El álbum que se está copiando (o el último que se empezó)."""
+            if 0 <= self.album_indice < len(self.albumes):
+                return self.albumes[self.album_indice]
+            return None
+
+        def contar(self, estado):
+            return sum(1 for a in self.albumes if a["estado"] == estado)
+
+        @property
+        def pistas_total(self):
+            return sum(len(a["pistas"]) for a in self.albumes
+                       if a["estado"] != "omitido")
+
+        @property
+        def pistas_hechas(self):
+            return sum(a["hechas"] for a in self.albumes)
+
+        @property
+        def bytes_pendientes(self):
+            """Lo que queda por escribir: los álbumes en espera y el resto del
+            que está en curso. Los omitidos y los que fallaron no cuentan."""
+            pendientes = 0
+            for a in self.albumes:
+                if a["estado"] == "espera":
+                    pendientes += a["bytes"]
+                elif a["estado"] == "copiando":
+                    pendientes += max(0, a["bytes"] - a["bytes_hechos"])
+            return pendientes
+
+        @property
+        def total_bytes(self):
+            """Lo escrito más lo que falta: baja si un álbum se omite o falla."""
+            return self.hechos_bytes + self.bytes_pendientes
+
+        def frac(self):
+            """De 0 a 1. Por bytes en una copia de verdad; una simulación no
+            escribe bytes, así que va por pistas."""
+            if not self.simulacion and self.total_bytes:
+                return min(1.0, self.hechos_bytes / self.total_bytes)
+            total = self.pistas_total
+            return min(1.0, self.pistas_hechas / total) if total else 0.0
+
+        def velocidad(self):
+            """Bytes/s medios de lo medido hasta ahora (la ventana del
+            velocímetro), o None sin un par de segundos de muestras."""
+            historial = list(self.velocimetro.historial)
+            if (self.simulacion or not historial
+                    or len(historial) * self.velocimetro.intervalo < self.MUESTRAS_MINIMAS_S):
+                return None
+            media = sum(historial) / len(historial)
+            return media if media > 0 else None
+
+        def restante(self):
+            """Segundos que faltan (bytes pendientes / velocidad media), o None
+            si todavía no se sabe o ya terminó."""
+            if self.terminada:
+                return None
+            velocidad = self.velocidad()
+            if velocidad is None:
+                return None
+            return self.bytes_pendientes / velocidad
+
+        def termina(self):
+            """Hora de reloj estimada del final, o None."""
+            restante = self.restante()
+            return None if restante is None else time.time() + restante
+
+        def duracion(self):
+            fin = self._t1 if self._t1 is not None else time.monotonic()
+            return max(0.0, fin - self._t0)
+
+        def velocidad_media(self):
+            """Bytes/s de la copia entera, ya terminada, contando las pausas
+            de sync: lo que sirve para estimar la próxima en esa tarjeta."""
+            if (self.simulacion or not self.terminada or self.hechos_bytes <= 0
+                    or self.duracion() < self.MUESTRAS_MINIMAS_S):
+                return None
+            return self.hechos_bytes / self.duracion()
+
+        # ── lo que mueve el hilo de la copia ──
+        def _album(self, rel):
+            i = self._por_rel.get(rel)
+            if i is None:
+                # fiio.copiar() habló de un álbum que no venía en el plan
+                self.albumes.append({"rel": rel, "artista": "", "album": rel,
+                                     "pistas": [], "bytes": 0, "bytes_hechos": 0,
+                                     "estado": "espera", "hechas": 0,
+                                     "orden_ok": None, "motivo": ""})
+                i = self._por_rel[rel] = len(self.albumes) - 1
+            return i
+
+        def evento(self, ev):
+            tipo = ev.get("t")
+            if tipo == "album":
+                self.album_indice = self._album(ev["rel"])
+                a = self.albumes[self.album_indice]
+                a["estado"] = "copiando"
+                a["hechas"] = 0
+                a["bytes_hechos"] = 0
+                if ev.get("bytes"):
+                    a["bytes"] = ev["bytes"]
+                self.pista = ""
+                self.pista_indice = self.pista_bytes = self.pista_hechos = 0
+            elif tipo == "omitido":
+                a = self.albumes[self._album(ev["rel"])]
+                a["estado"] = "omitido"
+                a["motivo"] = ev.get("motivo", "")
+            elif tipo == "pista":
+                a = self.albumes[self._album(ev["rel"])]
+                if not a["pistas"] and ev.get("total"):
+                    a["pistas"] = [""] * ev["total"]
+                self.pista = ev["archivo"]
+                self.pista_indice = ev["indice"]
+                self.pista_bytes = ev.get("bytes", 0)
+                self.pista_hechos = 0
+            elif tipo == "bytes":
+                n = ev["n"]
+                self.pista_hechos += n
+                self.hechos_bytes += n
+                a = self.actual()
+                if a is not None:
+                    a["bytes_hechos"] += n
+                self.velocimetro.muestra(self.hechos_bytes)
+            elif tipo == "pista_ok":
+                self.pista_hechos = self.pista_bytes
+                a = self.actual()
+                if a is not None:
+                    a["hechas"] += 1
+            elif tipo == "orden":
+                a = self.albumes[self._album(ev["rel"])]
+                a["orden_ok"] = ev["ok"]
+                if ev["ok"] is False:
+                    a["motivo"] = "el orden físico no quedó como se esperaba"
+            elif tipo == "album_ok":
+                a = self.albumes[self._album(ev["rel"])]
+                a["estado"] = "copiado"
+            elif tipo == "error":
+                a = self.albumes[self._album(ev["rel"])]
+                a["estado"] = "error"
+                a["motivo"] = ev.get("error", "")
+                self.errores.append({"rel": ev["rel"], "error": ev.get("error", "")})
+            elif tipo == "abortado":
+                a = self.albumes[self._album(ev["rel"])]
+                a["estado"] = "abortado"
+                a["motivo"] = f"se paró tras {a['hechas']} de {len(a['pistas'])} pistas"
+                self.abortado = True
+
+        def cerrar(self, resumen=None, cancelado=False):
+            """El hilo terminó: hora de fin y el álbum que quedó colgado."""
+            self.fin = time.time()
+            self._t1 = time.monotonic()
+            self.resumen = resumen
+            if cancelado or (resumen or {}).get("abortado"):
+                self.abortado = True
+            for a in self.albumes:
+                if a["estado"] != "copiando":
+                    continue
+                if self.abortado:
+                    a["estado"] = "abortado"
+                    a["motivo"] = (f"se paró tras {a['hechas']} de "
+                                   f"{len(a['pistas'])} pistas")
+                else:
+                    a["estado"] = "error"
+                    a["motivo"] = a["motivo"] or "la copia se cortó a medias"
+
+        # ── la velocidad medida de cada tarjeta, para estimar la próxima ──
+        @staticmethod
+        def archivo_velocidades():
+            return os.path.join(comun.DIR_PIPELINE, "fiio-velocidad.json")
+
+        @classmethod
+        def leer_velocidades(cls):
+            """{etiqueta: bytes/s} de la última copia de verdad a cada tarjeta."""
+            import json
+            try:
+                with open(cls.archivo_velocidades(), encoding="utf-8") as f:
+                    datos = json.load(f)
+            except (OSError, ValueError):
+                return {}
+            if not isinstance(datos, dict):
+                return {}
+            return {k: float(v) for k, v in datos.items()
+                    if isinstance(v, (int, float)) and v > 0}
+
+        @classmethod
+        def guardar_velocidades(cls, velocidades):
+            import json
+            ruta = cls.archivo_velocidades()
+            try:
+                os.makedirs(os.path.dirname(ruta), exist_ok=True)
+                with open(ruta + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(velocidades, f, ensure_ascii=False, indent=1)
+                os.replace(ruta + ".tmp", ruta)
+            except OSError:
+                pass
+
     def __init__(self):
         self.titulo = ""
         self.clase = "copia"     # "copia" se pinta en la vista FiiO; el resto, en Cola
@@ -1294,8 +1549,9 @@ class Trabajo:
         self.terminado_en = 0.0
         self.hilo = None
         self.velocimetro = Velocimetro(intervalo=0.4)
+        self.copia = None        # Trabajo.Copia mientras se copia a la tarjeta
 
-        # progreso de una copia
+        # progreso de una copia (lo pinta panel_trabajo; el modelo es self.copia)
         self.album = ""
         self.album_pistas = 0
         self.pista = ""
@@ -1322,11 +1578,13 @@ class Trabajo:
     def registrar(self, texto):
         self.lineas.append(texto)
 
-    def lanzar(self, titulo, funcion, clase="copia"):
+    def lanzar(self, titulo, funcion, clase="copia", copia=None):
+        """`copia` es el Trabajo.Copia ya lleno con el plan, si es una copia."""
         if self.activo:
             return False
         self.titulo = titulo
         self.clase = clase
+        self.copia = copia
         self.lineas.clear()
         self.cancelar.clear()
         self.resumen = None
@@ -1349,10 +1607,15 @@ class Trabajo:
         except Exception as error:
             self.registrar(f"{MAL} {error}")
             self.resumen = {"errores": [str(error)]}
+        if self.copia is not None and not self.copia.terminada:
+            self.copia.cerrar(self.resumen, self.cancelar.is_set())
         self.terminado_en = time.monotonic()
 
     def evento(self, ev):
-        """Recibe los diccionarios que emite fiio.copiar()."""
+        """Recibe los diccionarios que emite fiio.copiar(): todos van al
+        modelo de la copia; los de siempre, además, a los campos de arriba."""
+        if self.copia is not None:
+            self.copia.evento(ev)
         tipo = ev.get("t")
         if tipo == "album":
             self.album = ev["rel"]
@@ -3452,6 +3715,14 @@ class App:
         self.biblioteca = Biblioteca()
         self.reproductor = Reproductor()
         self.marcados = set()
+        # La última copia a la tarjeta (Trabajo.Copia), ya terminada: sigue
+        # aquí aunque luego se expulse o se lance otra tarea.
+        self.ultima_copia = None
+        # {"montaje", "etiqueta", "ok"} del último intento de expulsar
+        self.ultima_expulsion = None
+        self.expulsando = False
+        # {etiqueta: bytes/s} medidos en la última copia de verdad a cada tarjeta
+        self.velocidades_fiio = Trabajo.Copia.leer_velocidades()
         self.vistas = [VistaCola(), VistaBiblioteca(), VistaFiio(),
                        VistaLog(), VistaSalud()]
         self.actual = 0
@@ -3654,21 +3925,41 @@ class App:
         if self.trabajo.activo:
             self.avisar("ya hay una tarea en curso", ARENA)
             return
+        if self.expulsando:
+            self.avisar("la tarjeta se está expulsando", ARENA)
+            return
         raiz_destino = os.path.join(destino["montaje"], fiio.DESTINO_REL_POR_DEFECTO)
         albumes = list(plan)
         total = sum(a["bytes"] for a in albumes)
+        etiqueta = (destino.get("etiqueta")
+                    or os.path.basename(destino["montaje"].rstrip("/\\")))
+        copia = Trabajo.Copia(albumes, simulacion=simular, rehacer=rehacer,
+                              etiqueta=etiqueta, montaje=destino["montaje"])
 
         def tarea(trabajo):
             trabajo.total_bytes = 0 if simular else total
-            return fiio.copiar(
-                raiz_destino, albumes, simular=simular, rehacer=rehacer,
-                informar=trabajo.registrar,
-                evento=trabajo.evento,
-                cancelado=trabajo.cancelar.is_set)
+            resumen = None
+            try:
+                resumen = fiio.copiar(
+                    raiz_destino, albumes, simular=simular, rehacer=rehacer,
+                    informar=trabajo.registrar,
+                    evento=trabajo.evento,
+                    cancelado=trabajo.cancelar.is_set)
+            except Exception as error:
+                copia.errores.append({"rel": "", "error": str(error)})
+                raise
+            finally:
+                copia.cerrar(resumen, trabajo.cancelar.is_set())
+                self.ultima_copia = copia
+                media = copia.velocidad_media()
+                if media:
+                    self.velocidades_fiio[etiqueta] = media
+                    Trabajo.Copia.guardar_velocidades(self.velocidades_fiio)
+            return resumen
 
         titulo = ("simulando la copia" if simular
                   else ("reescribiendo en la tarjeta" if rehacer else "copiando al FiiO"))
-        self.trabajo.lanzar(f"{titulo} · {len(albumes)} álbumes", tarea)
+        self.trabajo.lanzar(f"{titulo} · {len(albumes)} álbumes", tarea, copia=copia)
         self.ir_a(2)
 
     def expulsar(self, destino):
@@ -3678,13 +3969,34 @@ class App:
         if self.trabajo.activo:
             self.avisar("espera a que termine la copia", ARENA)
             return
+        if self.expulsando:
+            return
         self.avisar("sincronizando y expulsando…", CIELO, 8)
+        etiqueta = destino.get("etiqueta") or destino["montaje"]
+        self.expulsando = True
 
-        def tarea(trabajo):
-            fiio.desmontar(destino["montaje"], informar=trabajo.registrar)
-            return {"copiados": 0, "archivos": 0, "bytes": 0}
+        # En su propio hilo y no como Trabajo: así no borra el resultado de la
+        # copia (ni su panel en FiiO) ni ocupa la Cola con un panel de tarea.
+        def tarea():
+            salida = []
+            try:
+                ok = bool(fiio.desmontar(destino["montaje"], informar=salida.append))
+            except Exception as error:
+                ok = False
+                salida.append(str(error))
+            self.ultima_expulsion = {"montaje": destino["montaje"],
+                                     "etiqueta": etiqueta, "ok": ok}
+            copia = self.ultima_copia
+            if copia is not None and copia.montaje == destino["montaje"]:
+                copia.expulsada = ok
+            if ok:
+                self.avisar(f"{OK} {etiqueta} expulsada", ESPUMA, 6)
+            else:
+                motivo = salida[-1] if salida else "no se pudo"
+                self.avisar(f"{MAL} {etiqueta} sin expulsar · {motivo}", CORAL, 8)
+            self.expulsando = False
 
-        self.trabajo.lanzar("expulsando la tarjeta", tarea)
+        threading.Thread(target=tarea, daemon=True).start()
 
     def arrancar_nicotine(self):
         if self.datos.nicotine_vivo():
@@ -3881,12 +4193,7 @@ class App:
             else:
                 tono = rampa(OCEANO, 0.48 + 0.42 * i / 7)
             x = escribir(win, 0, x, letra, (tono,), True)
-
-        pet = self.datos.peticion_en_curso()
-        if pet is not None:
-            glifo, color = glifo_estado(pet["estado"], t)
-            escribir(win, 0, x + 2, glifo, color)
-            escribir(win, 0, x + 4, elipsis(pet["consulta"], max(0, ancho - 50)), TENUE)
+        marca = x
 
         partes = []
         vivo = self.datos.nicotine_vivo()
@@ -3896,7 +4203,38 @@ class App:
                        "●" if destinos else "○", ESPUMA if destinos else TENUE))
         reloj = time.strftime("%H:%M")
         largo = sum(len(n) + 2 for n, _p, _c in partes) + 3 * len(partes) + len(reloj)
-        x = ancho - largo - 1
+
+        # Mientras se copia de verdad a la tarjeta, se ve desde cualquier
+        # pestaña: «FiiO ▮▮▮▮▯▯▯▯ 40 %», a la izquierda de los indicadores.
+        progreso = []
+        copia = self.trabajo.copia if self.trabajo.activo else None
+        if copia is not None and not copia.simulacion:
+            frac = copia.frac()
+            porcentaje = (f" {int(frac * 100)} %", AGUA)
+            completo = ([("FiiO ", TENUE)]
+                        + barra_trozos(8, frac, AGUA,
+                                       vivo=copia.velocimetro.actual > 0, t=t)
+                        + [porcentaje])
+            # sin sitio, primero se va la barra; en una ventana mínima, todo
+            for opcion in (completo, [("FiiO", TENUE), porcentaje]):
+                if ancho - largo - 4 - sum(len(c) for c, _ in opcion) > marca:
+                    progreso = opcion
+                    break
+        largo_progreso = sum(len(c) for c, _ in progreso) + (3 if progreso else 0)
+        x_derecha = ancho - largo - largo_progreso - 1
+
+        # La petición en curso se queda con lo que sobre; es lo primero que se va.
+        pet = self.datos.peticion_en_curso()
+        if pet is not None and x_derecha - marca >= 4:
+            glifo, color = glifo_estado(pet["estado"], t)
+            escribir(win, 0, marca + 2, glifo, color)
+            sitio = x_derecha - (marca + 4) - 2
+            if sitio >= 6:
+                escribir(win, 0, marca + 4, elipsis(pet["consulta"], sitio), TENUE)
+
+        x = x_derecha
+        if progreso:
+            x = escribir_trozos(win, 0, x, progreso) + 3
         for nombre, punto, color in partes:
             x = escribir(win, 0, x, nombre, TENUE)
             x = escribir(win, 0, x + 1, punto, color) + 3
@@ -4036,15 +4374,30 @@ class App:
             else:
                 escribir(win, y, x, duracion(transcurrido), TENUE)
             return
+        pet = self.datos.peticion_en_curso()
+        bajando = pet is not None and pet["estado"] == comun.DESCARGANDO
         if self.trabajo.activo:
-            escribir(win, y, 1, girador(t), CIELO)
-            escribir(win, y, 3, elipsis(self.trabajo.titulo, ancho - 4), TENUE)
-            return
+            copia = self.trabajo.copia
+            if copia is not None and isinstance(self.vista(), VistaFiio):
+                album = copia.actual()
+                texto = self.trabajo.titulo
+                if album is not None:
+                    nombre = (f"{album['artista']} — {album['album']}"
+                              if album["artista"] else album["rel"])
+                    texto = f"{'simulando' if copia.simulacion else 'copiando'} {nombre}"
+                escribir(win, y, 1, girador(t), CIELO)
+                escribir(win, y, 3, elipsis(texto, ancho - 4), AGUA)
+                return
+            # Fuera del FiiO, si algo se está bajando, manda la Cola: el
+            # progreso de la copia ya va en la cabecera.
+            if copia is None or not bajando:
+                escribir(win, y, 1, girador(t), CIELO)
+                escribir(win, y, 3, elipsis(self.trabajo.titulo, ancho - 4), TENUE)
+                return
         if self.datos.aviso:
             escribir(win, y, 1, elipsis(self.datos.aviso, ancho - 2), CORAL)
             return
-        pet = self.datos.peticion_en_curso()
-        if pet is not None and pet["estado"] == comun.DESCARGANDO:
+        if bajando:
             velocidad = self.datos.velocimetro
             texto = f"{comun.formato_bytes(velocidad.actual)}/s"
             escribir(win, y, 1, texto, BLANCO)
