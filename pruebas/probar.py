@@ -316,10 +316,26 @@ def falso(cols, filas, etiqueta):
     s = Sesion(f"falso-{etiqueta}", cols, filas, esc)
     s.capturar("bajando-1", espera=2.5)
     s.capturar("bajando-2", espera=2.0)
+    s.teclas("\r")                 # la ficha entera de la que se baja
+    s.capturar("ficha", espera=0.8)
+    s.teclas("\x1b")
     s.teclas(ABAJO)
     s.capturar("pendiente", espera=0.8)
     s.teclas(ABAJO)
     s.capturar("lista", espera=0.8)
+    # la fallida es la última línea: r la devuelve a la cola sin olvidar descartes
+    antes = next(p for p in json.load(open(esc["_cola"]))["peticiones"]
+                 if p["id"] == esc["_id_falla"])
+    s.teclas("\x1bOF", "r")       # fin
+    s.capturar("reintentar", espera=0.8)
+    despues = next((p for p in json.load(open(esc["_cola"]))["peticiones"]
+                    if p["id"] == esc["_id_falla"]), {})
+    bien = (despues.get("estado") == "pendiente"
+            and despues.get("rechazados") == antes["rechazados"])
+    print(f"  reintentada: estado={despues.get('estado')} "
+          f"descartes {'intactos' if bien else 'CAMBIADOS'}")
+    if not bien:
+        FALLOS.append(f"falso-{etiqueta}-reintentar")
     # ahora la descarga termina: la petición pasa a listo → aviso + parpadeo
     cola = json.load(open(esc["_cola"]))
     for p in cola["peticiones"]:
@@ -343,6 +359,15 @@ def falso(cols, filas, etiqueta):
     esc = escenario_falso(raiz, "buscando")
     s = Sesion(f"falso-{etiqueta}-busca", cols, filas, esc)
     s.capturar("buscando", espera=2.0)
+    s.cerrar()
+
+    # la captura principal con 8 colores, como en una terminal básica
+    esc = escenario_falso(raiz, "descargando")
+    parar = threading.Event()
+    threading.Thread(target=crecer, args=(esc["_actual"], parar), daemon=True).start()
+    s = Sesion(f"falso-{etiqueta}-8", cols, filas, esc, term="xterm")
+    s.capturar("bajando", espera=3.0)
+    parar.set()
     s.cerrar()
 
 

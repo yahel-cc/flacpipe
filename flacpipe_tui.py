@@ -1876,36 +1876,103 @@ def _sin_numero(archivo):
     return limpio or nombre
 
 
+def titulo_peticion(pet):
+    """«Artista — Álbum» cuando se sabe cada cosa; si no, lo que se pidió."""
+    artista, album = pet.get("artista"), pet.get("album")
+    if artista and album:
+        return f"{artista} — {album}"
+    return pet.get("consulta") or ""
+
+
+def _numero_pista(archivo):
+    """'07 The Sign.flac' → '07'; '' si el nombre no empieza por un número."""
+    m = re.match(r"^\s*(\d{1,3})", archivo)
+    return f"{int(m.group(1)):02d}" if m else ""
+
+
+def _pares_teclas(win, y, x, pares):
+    """«a pide un álbum   r reintentar»: la tecla en agua y negrita, lo que
+    hace en tenue. Devuelve la x siguiente."""
+    for i, (tecla, texto) in enumerate(pares):
+        x = escribir(win, y, x + (2 if i else 0), tecla, AGUA, True)
+        x = escribir(win, y, x + 1, texto, TENUE)
+    return x
+
+
 class VistaCola(Vista):
+    """Lo que se baja ahora, un bloque por álbum con sólo las pistas que
+    están bajando, y debajo de una raya una línea por cada petición que
+    espera turno, busca fuente o falló. Lo terminado se va (queda en el Log y
+    en la Biblioteca); la ficha entera de una petición se abre encima con ↵."""
     nombre = "Cola"
+    # Segundos que un álbum recién terminado se queda, en verde, antes de irse.
+    SALIDA = 1.6
+    # En una ventana muy ancha, lo de la derecha (velocidad, calidad, r y x)
+    # no se va al otro extremo: el bloque se lee de un vistazo.
+    ANCHO_MAXIMO = 104
 
     def __init__(self):
         self.cursor = 0
+        self.elegida = None      # id de la petición del cursor: la lista cambia sola
         self.desplazado = 0
-        self.todo = False
+
+    # ── qué se enseña ──
+    def bloques(self, app):
+        """Las que se bajan ahora, y las que acaban de terminar mientras se van."""
+        ahora = time.monotonic()
+        salida = []
+        for p in app.datos.peticiones():
+            if p["estado"] == comun.DESCARGANDO:
+                salida.append(p)
+            elif p["estado"] == comun.LISTO:
+                cambio = app.datos.cambios.get(p["id"])
+                if cambio and cambio[0] == comun.LISTO and ahora - cambio[1] < self.SALIDA:
+                    salida.append(p)
+        return salida
+
+    def lineas(self, app):
+        """Una línea cada una: lo que busca fuente, lo que espera turno (en el
+        orden de la cola) y lo que falló, que se queda hasta r o x."""
+        peticiones = app.datos.peticiones()
+        return [p for estado in (comun.BUSCANDO, comun.PENDIENTE, comun.FALLIDO)
+                for p in peticiones if p["estado"] == estado]
 
     def lista(self, app):
-        peticiones = app.datos.peticiones()
-        if self.todo:
-            return list(reversed(peticiones))
-        activas = [p for p in peticiones if p["estado"] in comun.ACTIVOS]
-        recientes = [p for p in peticiones if p["estado"] in comun.TERMINADOS][-8:]
-        return activas + list(reversed(recientes))
+        return self.bloques(app) + self.lineas(app)
 
     def seleccion(self, app):
         lista = self.lista(app)
         if not lista:
+            self.elegida = None
             return None
+        ids = [p["id"] for p in lista]
+        if self.elegida in ids:
+            self.cursor = ids.index(self.elegida)
         self.cursor = max(0, min(self.cursor, len(lista) - 1))
+        self.elegida = ids[self.cursor]
         return lista[self.cursor]
 
-    def teclas(self, app):
-        return [("↑↓", "moverse"), ("a", "pedir"), ("i", "importar csv"),
-                ("x", "cancelar"), ("o", "organizar"), ("c", "copiar al FiiO"),
-                ("t", "todo" if not self.todo else "sólo activas"),
-                ("L", "limpiar")]
+    def resumen(self, app):
+        activas = app.datos.activas()
+        if not activas:
+            return ""
+        bajando = sum(1 for p in activas if p["estado"] == comun.DESCARGANDO)
+        return f"{bajando} bajando · {len(activas) - bajando} en espera"
 
-    # ── la lista de la izquierda ──
+    def teclas(self, app):
+        pet = self.seleccion(app)
+        fallida = pet is not None and pet["estado"] == comun.FALLIDO
+        return [("a", "pedir"), ("i", "importar csv"),
+                ("x", "quitar" if fallida else "cancelar"), ("↵", "detalle")]
+
+    def ayuda(self, app):
+        """Lo que sale en `?`: las del pie y las que no caben en él."""
+        return [("↑↓", "moverse"), ("a", "pedir"), ("i", "importar csv"),
+                ("x", "cancelar, o quitar la fallida"), ("r", "reintentar la fallida"),
+                ("↵", "la ficha entera"), ("o", "organizar"), ("c", "ir al FiiO"),
+                ("L", "limpiar lo terminado")]
+
+    # ── dibujo ──
     def dibujar(self, app, y0, alto, ancho):
         win = app.pantalla
         # Organizar no es cosa del FiiO: su progreso se ve aquí, con la cola.
@@ -1913,486 +1980,259 @@ class VistaCola(Vista):
             VistaFiio.panel_trabajo(app, y0, alto, ancho)
             return
 
-        lista = self.lista(app)
-        doble = ancho >= 78
-        izq = max(30, min(46, int(ancho * 0.42))) if doble else ancho
+        t = time.monotonic()
+        ancho_total, ancho = ancho, min(ancho, self.ANCHO_MAXIMO)
+        bloques = self.bloques(app)
+        lineas = self.lineas(app)
+        elegida = self.seleccion(app)
+        elegida = elegida["id"] if elegida is not None else None
 
-        if not lista:
-            escribir(win, y0 + 1, 2, "La cola está vacía.", TENUE)
-            escribir(win, y0 + 3, 2, "Pulsa ", TENUE)
-            escribir(win, y0 + 3, 8, "a", AGUA, True)
-            escribir(win, y0 + 3, 10, " para pedir un álbum: «Artista - Álbum».", TENUE)
-            return
+        # Cada fila: (id de la petición si es su primera fila, qué pinta).
+        filas = []
+        if not bloques:
+            filas.append((None, lambda y: _pares_teclas(
+                win, y, escribir(win, y, 2, "Nada bajando ahora.  ", TENUE),
+                [("a", "pide un álbum")])))
+            filas.append((None, None))
+        for pet in bloques:
+            filas += self._bloque(app, pet, ancho, t)
+            filas.append((None, None))
+        if lineas:
+            filas.append((None, lambda y: escribir(win, y, 1, VACIO * (ancho - 2), LINEA)))
+            for pet in lineas:
+                filas.append((pet["id"], lambda y, pet=pet: self._linea(
+                    app, pet, y, ancho, t, pet["id"] == elegida)))
+        while filas and filas[-1][1] is None:
+            filas.pop()
 
-        n = len(lista)
-        self.cursor = max(0, min(self.cursor, n - 1))
-        # Con sitio de sobra, una fila en blanco entre peticiones; si no, apretadas.
-        paso = 3 if alto >= n * 3 else 2
-        visibles = max(1, (alto - 2) // paso + 1)
-        if n > visibles and (visibles - 1) * paso + 2 > alto - 1:
-            visibles = max(1, visibles - 1)        # deja sitio al «↓ N más»
-        if self.cursor < self.desplazado:
-            self.desplazado = self.cursor
-        if self.cursor >= self.desplazado + visibles:
-            self.desplazado = self.cursor - visibles + 1
-        self.desplazado = max(0, min(self.desplazado, max(0, n - visibles)))
+        # Aire arriba si cabe todo; si no cabe, la ventana sigue al cursor.
+        n = len(filas)
+        arriba = 1 if n < alto else 0
+        sitio = alto - arriba
+        cabeza = next((i for i, (ident, _p) in enumerate(filas) if ident == elegida), 0)
+        if n <= sitio:
+            self.desplazado = 0
+        else:
+            if cabeza < self.desplazado:
+                self.desplazado = cabeza
+            elif cabeza >= self.desplazado + sitio:
+                self.desplazado = cabeza - sitio + 1
+            self.desplazado = max(0, min(self.desplazado, n - sitio))
 
-        for fila in range(visibles):
-            indice = self.desplazado + fila
-            if indice >= n:
-                break
-            self._fila(app, lista[indice], y0 + fila * paso, izq,
-                       indice == self.cursor)
+        for i, (ident, pintor) in enumerate(filas[self.desplazado:self.desplazado + sitio]):
+            y = y0 + arriba + i
+            if ident is not None and ident == elegida:
+                pintar(win, y, 0, ancho_total, SEL)
+                escribir(win, y, 0, "▎", AGUA)
+            if pintor is not None:
+                pintor(y)
 
-        ocultas = n - self.desplazado - visibles
+        ocultas = n - self.desplazado - sitio
         partes = ([f"↑ {self.desplazado}"] if self.desplazado else []) + \
                  ([f"↓ {ocultas}"] if ocultas > 0 else [])
-        pintadas = min(visibles, n - self.desplazado)
-        if partes and (pintadas - 1) * paso + 2 <= alto - 1:
-            escribir(win, y0 + alto - 1, 1, "  ".join(partes), TENUE)
+        if partes:
+            texto = "  ".join(partes)
+            escribir(win, y0 + alto - 1, ancho - len(texto) - 1, texto, TENUE)
 
-        if doble:
-            for y in range(y0 + 1, y0 + alto - 1):
-                escribir(win, y, izq, "│", LINEA)
-            self._detalle(app, self.seleccion(app), y0, alto, izq + 2, ancho - izq - 3)
-
-    def _fila(self, app, pet, y, ancho, activa):
+    def _bloque(self, app, pet, ancho, t):
+        """Las filas de un álbum que se baja: título y velocidad, la barra del
+        álbum, las pistas que bajan ahora mismo y cuántas faltan."""
         win = app.pantalla
-        estado = pet["estado"]
-        t = time.monotonic()
+        datos = app.datos
+        terminado = pet["estado"] == comun.LISTO
+        en_curso = datos.peticion_en_curso()
+        propia = not terminado and en_curso is not None and en_curso["id"] == pet["id"]
+        v = datos.velocimetro
+        p = pet.get("progreso") or {}
+        total = p.get("total") or 0
+        activas = datos.pistas_activas if propia else []
+        hechas = max(p.get("terminados") or 0, len(datos.bajados) if propia else 0)
+        if total:
+            hechas = total if terminado else min(hechas, total)
+        ahora = time.monotonic()
 
-        if activa:
-            for fila in (y, y + 1):
-                pintar(win, fila, 0, ancho, SEL)
-                escribir(win, fila, 0, "▎", AGUA)
+        def bytes_de(pista):
+            """Los bytes de ahora, entre una lectura y la siguiente."""
+            b = pista["bytes"] + pista["velocidad"] * max(0.0, ahora - datos.muestreado_en)
+            return min(b, pista["total"]) if pista["total"] else b
 
-        glifo, color = glifo_estado(estado, t)
-        escribir(win, y, 2, glifo, color)
-        titulo = pet["consulta"]
-        if activa:
-            titulo = marquesina(titulo, ancho - 5, t)
-        escribir(win, y, 4, elipsis(titulo, ancho - 5),
-                 BLANCO if activa or estado in comun.EN_CURSO else NORMAL)
-        self._segunda_linea(app, pet, y + 1, 4, ancho - 5, t)
+        # Por bytes si se sabe lo que pesa todo; si no, por pistas, contando
+        # la parte bajada de las que tienen tamaño; si no, sólo las acabadas.
+        if terminado:
+            frac = 1.0
+        elif propia and datos.bytes_album_total:
+            frac = ((sum(b for _n, b in datos.bajados) + sum(bytes_de(a) for a in activas))
+                    / datos.bytes_album_total)
+        elif total:
+            frac = (hechas + sum(bytes_de(a) / a["total"] for a in activas if a["total"])) / total
+        else:
+            frac = 0.0
+        frac = max(0.0, min(1.0, frac))
+        color = ESPUMA if terminado else AGUA
+        cambio = datos.cambios.get(pet["id"])
+        u = (t - cambio[1]) / self.SALIDA if terminado and cambio else 1.0
 
-        # Recién terminada: un destello de su color cruza la fila, dos veces.
-        cambio = app.datos.cambios.get(pet["id"])
-        if cambio and estado in comun.TERMINADOS:
-            u = (t - cambio[1]) / 1.1
-            if u < 2:
+        def destellar(y):
+            if u < 1:
                 _anima()
-                tonos = {comun.LISTO: ARRECIFE, comun.FALLIDO: CORALES}.get(estado, TURQUESA)
-                for fila in (y, y + 1):
-                    destello(fila, 0, ancho, u % 1.0, tonos)
+                destello(y, 0, ancho, u, ARRECIFE)
 
-    def _segunda_linea(self, app, pet, y, x, ancho, t):
-        """Debajo del título: la barra si está en marcha, el resultado si acabó."""
+        def cabeza(y):
+            glifo, tono = (OK, ESPUMA) if terminado else glifo_estado(pet["estado"], t)
+            escribir(win, y, 1, glifo, tono)
+            der = ("terminado" if terminado
+                   else f"{comun.formato_bytes(v.actual)}/s" if propia and v.actual > 0 else "")
+            escribir(win, y, 3, elipsis(titulo_peticion(pet), ancho - 3 - len(der) - 4),
+                     ESPUMA if terminado else BLANCO)
+            if der:
+                escribir(win, y, ancho - 2 - len(der), der, ESPUMA if terminado else NORMAL,
+                         negrita=True)
+            destellar(y)
+
+        def barra_album(y):
+            cifra = f" {int(frac * 100):>3} %"
+            cuantas = f"  {hechas} de {total} pistas" if total else ""
+            ancho_barra = max(8, min(56, ancho - 3 - len(cifra) - len(cuantas) - 2))
+            x = barra(win, y, 3, ancho_barra, frac, color,
+                      vivo=propia and v.actual > 0, t=t)
+            x = escribir(win, y, x, cifra, color)
+            escribir(win, y, x, cuantas, TENUE)
+            destellar(y)
+
+        filas = [(pet["id"], cabeza), (None, barra_album)]
+        if not propia:
+            return filas
+
+        calidad = calidad_corta((pet.get("candidato") or {}).get("detalle"))
+        col = self._columnas(ancho, calidad)
+        for archivo, cuando in sorted(datos.recien_bajadas.items(), key=lambda e: e[1]):
+            if ahora - cuando < SEGUNDOS_RECIEN:
+                filas.append((None, lambda y, a=archivo, c=cuando: self._pista_lista(
+                    app, y, a, c, col)))
+        for pista in activas:
+            filas.append((None, lambda y, pista=pista: self._pista(
+                app, y, pista, bytes_de(pista), col, calidad, t)))
+        if not activas and not hechas:
+            filas.append((None, lambda y: escribir_trozos(
+                win, y, col["x"], cargando("esperando al primer archivo…", t, TENUE),
+                ancho - col["x"] - 1)))
+        faltan = total - hechas - len(activas) if total else 0
+        if faltan > 0:
+            texto = f"y {faltan} pista{'s' if faltan > 1 else ''} más por bajar"
+            filas.append((None, lambda y: escribir(win, y, col["x"],
+                                                   elipsis(texto, ancho - col["x"] - 1), TENUE)))
+        return filas
+
+    @staticmethod
+    def _columnas(ancho, calidad):
+        """Dónde va cada cosa en las filas de pista, para que se alineen.
+        Con poco sitio se va primero la calidad y luego se acorta la barra."""
+        col = {"x": 5, "fin": ancho, "barra": max(8, min(20, (ancho - 40) // 3)),
+               "cifra": 9, "velocidad": 10, "calidad": len(calidad) + 2 if calidad else 0}
+
+        def sitio():
+            return (ancho - col["x"] - 3 - 1 - col["barra"] - col["cifra"]
+                    - col["velocidad"] - col["calidad"] - 2)
+
+        if sitio() < 12 and col["calidad"]:
+            col["calidad"] = 0
+        if sitio() < 12:
+            col["barra"] = max(6, col["barra"] - (12 - sitio()))
+        col["titulo"] = max(4, min(32, sitio()))
+        return col
+
+    def _pista(self, app, y, pista, bajado, col, calidad, t):
+        """Una pista que se baja ahora: número, título, barra, % y velocidad.
+        Sin tamaño conocido no hay %: los bytes y una corriente que pasa."""
+        win = app.pantalla
+        archivo = pista["archivo"]
+        x = escribir(win, y, col["x"], rellenar(_numero_pista(archivo), 3), TENUE)
+        x = escribir(win, y, x, rellenar(_sin_numero(archivo), col["titulo"]) + " ", NORMAL)
+        if pista["total"]:
+            frac = bajado / pista["total"]
+            barra(win, y, x, col["barra"], frac, AGUA, vivo=pista["velocidad"] > 0, t=t)
+            cifra = f" {int(frac * 100):>3} %"
+        else:
+            escribir_trozos(win, y, x, corriente(col["barra"], t))
+            cifra = f" {comun.formato_bytes(bajado)}"
+        x += col["barra"]
+        x = escribir(win, y, x, rellenar(cifra, col["cifra"]), AGUA)
+        if pista["velocidad"] > 0:
+            escribir(win, y, x, f"{comun.formato_bytes(pista['velocidad'])}/s"
+                     .rjust(col["velocidad"]), NORMAL)
+        if col["calidad"]:
+            escribir(win, y, col["fin"] - 2 - len(calidad), calidad, TENUE)
+
+    def _pista_lista(self, app, y, archivo, cuando, col):
+        """La pista que acaba de terminar se pone verde un momento y se va."""
+        win = app.pantalla
+        _anima()
+        tono = ESPUMA if time.monotonic() - cuando < SEGUNDOS_RECIEN * 0.6 else TENUE
+        escribir(win, y, col["x"] - 2, OK, tono)
+        x = escribir(win, y, col["x"], rellenar(_numero_pista(archivo), 3), tono)
+        x = escribir(win, y, x, rellenar(_sin_numero(archivo), col["titulo"]) + " ", tono)
+        escribir(win, y, x, "lista", TENUE)
+
+    def _linea(self, app, pet, y, ancho, t, elegida):
+        """Una petición que no se baja: glifo, título y qué le pasa."""
         win = app.pantalla
         estado = pet["estado"]
-
-        if estado == comun.DESCARGANDO:
-            p = pet.get("progreso") or {}
-            hechos, total = p.get("terminados", 0), p.get("total", 0) or 1
-            frac = hechos / total
-            cola = f" {int(frac * 100):>3} %  {hechos}/{total}"
-            ancho_barra = max(6, ancho - len(cola))
-            barra(win, y, x, ancho_barra, frac, AGUA,
-                  vivo=app.datos.velocimetro.actual > 0, t=t)
-            escribir(win, y, x + ancho_barra, cola, AGUA)
-        elif estado == comun.BUSCANDO:
-            transcurrido = segundos_desde(pet.get("actualizado", ""))
-            frac = min(1.0, transcurrido / VENTANA_BUSQUEDA)
-            cola = (f" {int(transcurrido):>3} s" if transcurrido < VENTANA_BUSQUEDA
-                    else " eligiendo")
-            ancho_barra = max(6, ancho - len(cola))
-            barra(win, y, x, ancho_barra, frac, CIELO, t=t)
-            escribir(win, y, x + ancho_barra, cola, CIELO)
+        glifo, tono_glifo = glifo_estado(estado, t)
+        if estado == comun.BUSCANDO:
+            texto = f"buscando fuente · {int(segundos_desde(pet.get('actualizado', '')))} s"
+            tono = CIELO
         elif estado == comun.PENDIENTE:
             mensaje = pet.get("mensaje") or ""
-            reintento = mensaje.startswith("reintentando")
-            texto = mensaje if reintento else "esperando turno"
-            escribir(win, y, x, elipsis(f"{texto} · {desde(pet.get('actualizado', ''))}",
-                                        ancho), ARENA if reintento else TENUE)
-        elif estado == comun.LISTO and pet.get("resultado"):
-            r = pet["resultado"]
-            faltan = r.get("faltantes") or []
-            if faltan:
-                escribir(win, y, x, elipsis(f"{AVISO} falta " + ", ".join(
-                    f"{n:02d}" for n in faltan), ancho), ARENA)
+            if mensaje.startswith("reintentando"):
+                texto, tono = mensaje, ARENA
+            elif not app.datos.nicotine_vivo():
+                texto, tono = "esperando turno · Nicotine+ está cerrado", ARENA
             else:
-                escribir(win, y, x, elipsis(f"{r['pistas']} pistas · {r['calidad']}", ancho),
-                         TENUE)
-        elif pet.get("mensaje"):
-            escribir(win, y, x, elipsis(pet["mensaje"], ancho),
-                     CORAL if estado == comun.FALLIDO else TENUE)
+                texto, tono = "esperando turno", LILA
         else:
-            escribir(win, y, x, desde(pet.get("actualizado", "")), TENUE)
+            texto, tono = pet.get("mensaje") or "falló", CORAL
 
-    # ── el detalle de la derecha ──
-    def _detalle(self, app, pet, y0, alto, x, ancho):
-        """Todo lo que se sabe de la petición, repartido según el sitio que haya:
-        ficha (a dos columnas si cabe), el bloque vivo del estado, y debajo
-        pistas, fuentes e historia; con mucho ancho, pistas a un lado y el
-        resto al otro."""
-        if pet is None or ancho < 20:
-            return
-        win = app.pantalla
-        t = time.monotonic()
-        estado = pet["estado"]
-        tope = y0 + alto
-
-        glifo, color_glifo = glifo_estado(estado, t)
-        derecha = f"{estado} · {desde(pet.get('actualizado', ''))}"
-        escribir(win, y0, x, elipsis(pet["consulta"], max(8, ancho - len(derecha) - 4)),
-                 BLANCO)
-        escribir(win, y0, x + ancho - len(derecha) - 2, glifo, color_glifo)
-        escribir(win, y0, x + ancho - len(derecha), derecha,
-                 COLOR_ESTADO.get(estado, NORMAL))
-        escribir(win, y0 + 1, x, VACIO * ancho, LINEA)
-        y = y0 + 2
-
-        campos = self._campos(app, pet)
-        if alto < 18:
-            # Poca altura: se quedan los campos de más peso, en su orden.
-            limite = max(2, (alto - 2) // 3)
-            elegidos = set(id(c) for c in sorted(campos, key=lambda c: c[3])[:limite])
-            campos = [c for c in campos if id(c) in elegidos]
-        y = self._ficha(win, y, x, ancho, campos, tope)
-        y = self._vivo(app, pet, y, x, ancho, tope, t, holgado=alto >= 18)
-
-        secciones = [s for s in (self._pistas(app, pet, ancho, t),
-                                 self._fuentes(app, pet, ancho),
-                                 self._historia(app, pet, ancho))
-                     if s is not None]
-        resto = tope - y
-        if not secciones or resto < 3:
-            return
-        lado_a_lado = (ancho >= 110 and resto >= 12 and len(secciones) > 1
-                       and secciones[0][0].startswith("pistas"))
-        if lado_a_lado:
-            col = (ancho - 3) // 2
-            self._apilar(win, y, x, col, resto, secciones[:1])
-            for yy in range(y + 1, tope):
-                escribir(win, yy, x + col + 1, "│", LINEA)
-            self._apilar(win, y, x + col + 3, ancho - col - 3, resto, secciones[1:])
-        else:
-            self._apilar(win, y, x, ancho, resto, secciones)
-
-    @staticmethod
-    def _ficha(win, y, x, ancho, campos, tope):
-        if not campos or y >= tope:
-            return y
-        if ancho >= 84:
-            col = (ancho - 3) // 2
-            mitad = (len(campos) + 1) // 2
-            columnas = [campos[:mitad], campos[mitad:]]
-            xs = [x, x + col + 3]
-        else:
-            col, columnas, xs = ancho, [campos], [x]
-        filas = max(len(c) for c in columnas)
-        for i in range(filas):
-            if y + i >= tope:
-                break
-            for cx, c in zip(xs, columnas):
-                if i < len(c):
-                    etiqueta, valor, color, _peso = c[i]
-                    escribir(win, y + i, cx, rellenar(etiqueta, 10), TENUE)
-                    escribir(win, y + i, cx + 10, elipsis(str(valor), col - 10), color)
-        return y + min(filas, tope - y)
-
-    def _campos(self, app, pet):
-        """(etiqueta, valor, color, peso). El peso decide qué sobrevive cuando
-        hay poca altura: 1 lo esencial, 2 lo útil, 3 lo prescindible."""
-        estado = pet["estado"]
-        creado = pet.get("creado", "")
-        campos = [("pedido", f"{hora_de(creado)} · {desde(creado)}", NORMAL, 2),
-                  ("tipo", "canción suelta" if pet.get("tipo") == "cancion" else "álbum",
-                   NORMAL, 3)]
-        if pet.get("lista"):
-            campos.append(("lista", pet["lista"], LILA, 2))
-        if estado == comun.BUSCANDO:
-            consulta = pet["consulta"]
-            termino = consulta if "flac" in consulta.casefold() else f"{consulta} flac"
-            campos.append(("término", termino, CIELO, 1))
-        if estado == comun.PENDIENTE:
-            activas = [p["id"] for p in app.datos.activas()]
-            delante = activas.index(pet["id"]) if pet["id"] in activas else 0
-            campos.append(("turno", "es la siguiente" if delante == 0
-                           else f"{delante} por delante", ARENA, 1))
-        cand = pet.get("candidato") or {}
-        if cand:
-            campos.append(("fuente", f"{cand.get('usuario', '?')} · "
-                                     f"{cand.get('puntos', '?')} pts", AGUA, 1))
-            campos.append(("carpeta", os.path.basename(
-                (cand.get("carpeta") or "").replace("\\", "/")), NORMAL, 3))
-            campos.append(("calidad", cand.get("detalle", ""), NORMAL,
-                           1 if estado == comun.DESCARGANDO else 2))
-        resultado = pet.get("resultado") or {}
-        if resultado:
-            campos.append(("destino", resultado.get("carpeta", ""), ESPUMA, 1))
-            if resultado.get("faltantes"):
-                campos.append(("faltan", ", ".join(
-                    f"{n:02d}" for n in resultado["faltantes"]), ARENA, 1))
-        if estado in comun.TERMINADOS:
-            tardo = duracion_entre(creado, pet.get("actualizado", ""))
-            if tardo:
-                campos.append(("tardó", tardo, TENUE, 2))
-        if pet.get("intentos"):
-            campos.append(("intentos", f"{pet['intentos']} agotado(s)", ARENA, 3))
-        if pet.get("rechazados"):
-            campos.append(("descartes", f"{len(pet['rechazados'])} fuente(s)", TENUE, 3))
-        mensaje = pet.get("mensaje") or ""
-        if mensaje and estado in (comun.FALLIDO, comun.CANCELADO):
-            campos.append(("motivo" if estado == comun.FALLIDO else "nota", mensaje,
-                           CORAL if estado == comun.FALLIDO else TENUE, 1))
-        return campos
-
-    def _vivo(self, app, pet, y, x, ancho, tope, t, holgado=True):
-        """Lo que se mueve: la barra de descarga, la cuenta de la búsqueda o el
-        pulso de la espera. Cada estado en marcha tiene el suyo."""
-        win = app.pantalla
-        estado = pet["estado"]
-        if tope - y < 2:
-            return y
-        hueco = 1 if holgado else 0
-
-        if estado == comun.DESCARGANDO:
-            y += hueco
-            p = pet.get("progreso") or {}
-            hechos, total = p.get("terminados", 0), p.get("total", 0) or 1
-            frac = hechos / total
-            cola = f"  {int(frac * 100):>3} %  {hechos} de {total} pistas"
-            ancho_barra = max(8, min(60, ancho - 10 - len(cola)))
-            escribir(win, y, x, rellenar("progreso", 10), TENUE)
-            barra(win, y, x + 10, ancho_barra, frac, AGUA,
-                  vivo=app.datos.velocimetro.actual > 0, t=t)
-            escribir(win, y, x + 10 + ancho_barra, cola, AGUA)
-            # una fila de aire: la barra y el oleaje de debajo son bloques
-            # macizos y, pegados, se leen como una sola mancha
-            y += 1 + hueco
-            if y < tope:
-                v = app.datos.velocimetro
-                escribir(win, y, x, rellenar("velocidad", 10), TENUE)
-                xx = escribir(win, y, x + 10,
-                              rellenar(f"{comun.formato_bytes(v.actual)}/s", 11), BLANCO)
-                # Por orden de prioridad: el contador (a la derecha), el
-                # medidor y, si aún sobra sitio, la chispa; ésta ya va en la
-                # barra de estado, así que es la primera que se cae.
-                bajado = f"{comun.formato_bytes(v.estimado())} bajados"
-                fin = x + ancho
-                if fin - xx >= len(bajado) + 10:
-                    escribir(win, y, fin - len(bajado), bajado, TENUE)
-                    fin -= len(bajado) + 2
-                sitio = fin - xx
-                if sitio >= 8:
-                    xx = escribir_trozos(win, y, xx, medidor(v, min(16, sitio), t)) + 2
-                sitio = fin - xx
-                if sitio >= 8:
-                    escribir_trozos(win, y, xx, chispa(v.historial, min(30, sitio)))
-                y += 1
-
-        elif estado == comun.BUSCANDO:
-            y += hueco
-            transcurrido = segundos_desde(pet.get("actualizado", ""))
-            frac = min(1.0, transcurrido / VENTANA_BUSQUEDA)
-            if transcurrido < VENTANA_BUSQUEDA:
-                cola = f"  {int(transcurrido):>2} s de {VENTANA_BUSQUEDA} · acumulando resultados"
-                color = CIELO
-            elif transcurrido < VENTANA_BUSQUEDA + 6:
-                cola, color = "  puntuando lo que llegó", CIELO
-            else:
-                cola = (f"  sin resultados aún · el plugin espera hasta "
-                        f"{VENTANA_BUSQUEDA * 3} s")
-                color = ARENA
-            ancho_barra = max(8, min(40, ancho - 12 - len(cola)))
-            escribir(win, y, x, rellenar("búsqueda", 10), TENUE)
-            glifo, color_glifo = sonar(t)
-            escribir(win, y, x + 10, glifo, color_glifo)
-            barra(win, y, x + 12, ancho_barra, frac, CIELO, t=t)
-            escribir(win, y, x + 12 + ancho_barra, elipsis(cola, ancho - 12 - ancho_barra),
-                     color)
-            y += 1
-
-        elif estado == comun.PENDIENTE:
-            y += hueco
-            escribir(win, y, x, rellenar("turno", 10), TENUE)
-            if app.datos.nicotine_vivo():
-                escribir(win, y, x + 10, GLIFO_ESTADO[comun.PENDIENTE], respiro(t))
-                escribir(win, y, x + 12, elipsis("esperando a que el plugin la tome",
-                                                 ancho - 12), TENUE)
-            else:
-                escribir(win, y, x + 10, elipsis(
-                    f"{AVISO} Nicotine+ está cerrado: la cola no avanza", ancho - 10), ARENA)
-            y += 1
-        return y
-
-    # ── las tres secciones: (título, filas, foco) o None ──
-    def _pistas(self, app, pet, ancho, t):
-        estado = pet["estado"]
-        if estado == comun.DESCARGANDO:
-            return self._pistas_bajando(app, pet, ancho, t)
-        if estado != comun.LISTO:
-            return None
-        carpeta = (pet.get("resultado") or {}).get("carpeta")
-        if not carpeta:
-            return None
-        ruta = os.path.join(comun.RAIZ_BIBLIOTECA, carpeta)
-        if not os.path.isdir(ruta):
-            # quizá se pasó a la heredada con h, para compartirla
-            ruta = os.path.join(Biblioteca.RAIZ_HEREDADA, carpeta)
-        if not os.path.isdir(ruta):
-            return ("pistas", [([(f"{AVISO} la carpeta ya no está en {carpeta}", ARENA)], [])],
-                    None)
-        app.biblioteca.pedir_analisis({"dir": ruta})
-        det = app.biblioteca.detalle.get(ruta)
-        if det is None:
-            return ("pistas", [(cargando("leyendo las pistas…", t), [])], None)
-
-        pistas = sorted(det["pistas"], key=lambda p: (p.get("disco") or 1, p.get("pista") or 0))
-        faltan = set(det.get("huecos") or [])
-        filas, total = [], 0
-        for p in pistas:
-            n = p.get("pista")
-            while faltan and min(faltan) < (n or 0):
-                h = min(faltan)
-                faltan.discard(h)
-                filas.append(([(f"{h:02d}  ", ARENA), ("— falta —", ARENA)], []))
-            total += p.get("tamaño", 0)
-            filas.append(([(f"{n:02d}  " if n else "··  ", TENUE),
-                           (p.get("titulo") or p["archivo"], NORMAL)],
-                          [(duracion(p.get("duracion")), TENUE), ("  ", None),
-                           (f"{comun.formato_bytes(p.get('tamaño', 0)):>9}", TENUE),
-                           ("  ", None), (OK, ESPUMA)]))
-        for h in sorted(faltan):
-            filas.append(([(f"{h:02d}  ", ARENA), ("— falta —", ARENA)], []))
-        if not filas:
-            filas.append(([(det.get("calidad") or "sin pistas legibles", ARENA)], []))
-        titulo = f"pistas · {len(pistas)} · {det.get('calidad', '')} · {comun.formato_bytes(total)}"
-        return (titulo, filas, None)
-
-    def _pistas_bajando(self, app, pet, ancho, t):
-        datos = app.datos
-        p = pet.get("progreso") or {}
-        total = p.get("total", 0) or 0
-        hechos = max(p.get("terminados", 0), len(datos.bajados))
-        filas = []
-        for i, (nombre, b) in enumerate(datos.bajados, 1):
-            filas.append(([(f"{i:02d}  ", TENUE), (_sin_numero(nombre), NORMAL)],
-                          [(f"{comun.formato_bytes(b):>9}", TENUE), ("  ", None), (OK, ESPUMA)]))
-        foco = None
-        v = datos.velocimetro
-        for nombre, b in datos.incompletos:
-            estimado = b + v.actual * max(0.0, time.monotonic() - datos.muestreado_en)
-            foco = len(filas)
-            filas.append(([(f"{len(filas) + 1:02d}  ", BLANCO),
-                           (_sin_numero(nombre), BLANCO)],
-                          corriente(10 if ancho >= 50 else 6, t)
-                          + [(f" {comun.formato_bytes(estimado):>9}", AGUA)]))
-        pendientes = total - len(filas)
-        for _i in range(max(0, pendientes)):
-            filas.append(([(f"{len(filas) + 1:02d}  ", LINEA), ("pendiente", TENUE)],
-                          [("·", LINEA)]))
-        if not filas:
-            filas.append((cargando("esperando al primer archivo…", t, TENUE), []))
-        titulo = f"pistas · {hechos} de {total} bajadas"
-        return (titulo, filas, foco)
-
-    def _fuentes(self, app, pet, ancho):
-        candidatos = app.datos.candidatos(pet["id"])
-        if not candidatos:
-            return None
-        cand = pet.get("candidato") or {}
-        elegida = (cand.get("usuario"),
-                   os.path.basename((cand.get("carpeta") or "").replace("\\", "/")))
-        descartadas = {(u, os.path.basename((c or "").replace("\\", "/")))
-                       for u, c in (pet.get("rechazados") or [])}
-        filas = []
-        for c in candidatos:
-            clave = (c["usuario"], c["carpeta"])
-            es_elegida = clave == elegida
-            es_descartada = clave in descartadas
-            izq = [(f"{c['puntos']:>4}  ", AGUA if es_elegida else TENUE),
-                   (rellenar(c["usuario"], 16) + "  ", BLANCO if es_elegida else NORMAL)]
-            if ancho >= 56:
-                izq.append((rellenar(c["detalle"], 28) + "  ", TENUE))
-            if ancho >= 84:
-                izq.append((c["carpeta"], TENUE))
-            corto = ancho < 70
-            der = ([("◂" if corto else "◂ elegida", AGUA)] if es_elegida
-                   else [(MAL if corto else f"{MAL} descartada", CORAL)] if es_descartada
-                   else [])
-            filas.append((izq, der))
-        return (f"fuentes · {len(filas)} candidatas", filas, None)
-
-    def _historia(self, app, pet, ancho):
-        lineas = app.datos.historia(pet["id"])
-        filas = []
-        for linea in lineas:
-            m = PATRON_LOG.match(linea)
-            if not m:
-                continue
-            marca, etiqueta, resto = m.groups()
-            if etiqueta == "candidato":
-                continue                       # eso ya está en «fuentes»
-            resto = (resto.replace("/" + pet["id"], "").replace(pet["id"], "")
-                          .replace(comun.DIR_DESCARGAS, ".descargas")
-                          .replace(comun.RAIZ_BIBLIOTECA + os.sep, ""))
-            resto = re.sub(r"\s{2,}", " ", resto).strip(" :")
-            color = VistaLog.ETIQUETAS.get(etiqueta.split()[0], NORMAL)
-            hora = marca[11:19] if len(marca) > 18 else marca
-            filas.append(([(hora + "  ", TENUE), (rellenar(etiqueta, 10) + " ", color),
-                           (resto, NORMAL)], []))
-        if not filas:
-            return None
-        if pet["estado"] in comun.EN_CURSO:
-            izq, der = filas[-1]
-            filas[-1] = ([izq[0], izq[1], (izq[2][0], BLANCO)], der)
-        return (f"historia · {len(filas)} líneas", filas, len(filas) - 1)
-
-    @staticmethod
-    def _apilar(win, y, x, ancho, alto, secciones):
-        """Reparte `alto` filas entre las secciones: cada una recibe hasta 4 de
-        entrada y lo que sobre se reparte por orden. Cada sección empieza con
-        una fila en blanco."""
-        necesidades = [len(filas) + 2 for _t, filas, _f in secciones]
-        alturas = [0] * len(secciones)
-        libre = alto
-        for i, n in enumerate(necesidades):
-            alturas[i] = min(n, 4, libre)
-            libre -= alturas[i]
-        for i, n in enumerate(necesidades):
-            extra = min(n - alturas[i], libre)
-            alturas[i] += extra
-            libre -= extra
-        for (titulo, filas, foco), h in zip(secciones, alturas):
-            if h < 3:
-                continue
-            pintar_seccion(win, y + 1, x, ancho, h - 1, titulo, filas, foco)
-            y += h
+        col = max(16, min(38, (ancho - 30) // 2))
+        escribir(win, y, 1, glifo, tono_glifo)
+        escribir(win, y, 3, rellenar(titulo_peticion(pet), col), BLANCO if elegida else NORMAL)
+        x = 3 + col + 2
+        der = [("r", "reintentar"), ("x", "quitar")] if estado == comun.FALLIDO else []
+        largo_der = sum(len(k) + len(d) + 3 for k, d in der) - 2 if der else 0
+        sitio = ancho - x - 2 - (largo_der + 2 if der else 0)
+        if der and sitio < 12 and not elegida:
+            der, sitio = [], ancho - x - 2           # sin sitio, sólo en la elegida
+        escribir(win, y, x, elipsis(texto, sitio), tono)
+        if der:
+            _pares_teclas(win, y, ancho - 2 - largo_der, der)
 
     def tecla(self, app, k):
         lista = self.lista(app)
-        if k == curses.KEY_UP:
-            self.cursor = max(0, self.cursor - 1)
-        elif k == curses.KEY_DOWN:
-            self.cursor = min(max(0, len(lista) - 1), self.cursor + 1)
-        elif k == curses.KEY_HOME:
-            self.cursor = 0
-        elif k == curses.KEY_END:
-            self.cursor = max(0, len(lista) - 1)
-        elif k == curses.KEY_NPAGE:
-            self.cursor = min(max(0, len(lista) - 1), self.cursor + 5)
-        elif k == curses.KEY_PPAGE:
-            self.cursor = max(0, self.cursor - 5)
+        pet = self.seleccion(app)
+        pasos = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                 curses.KEY_PPAGE: -5, curses.KEY_NPAGE: 5}
+        if k in pasos or k in (curses.KEY_HOME, curses.KEY_END):
+            if lista:
+                if k == curses.KEY_HOME:
+                    self.cursor = 0
+                elif k == curses.KEY_END:
+                    self.cursor = len(lista) - 1
+                else:
+                    self.cursor = max(0, min(len(lista) - 1, self.cursor + pasos[k]))
+                self.elegida = lista[self.cursor]["id"]
+        elif k in ("\n", "\r", curses.KEY_ENTER):
+            if pet is not None:
+                app.abrir(OverlayFicha(pet["id"]))
         elif k == "a":
             app.abrir(OverlayPedir())
         elif k == "i":
             app.abrir(OverlayImportar())
         elif k == "x":
-            app.cancelar_peticion(self.seleccion(app))
-        elif k == "t":
-            self.todo = not self.todo
-            self.cursor = 0
+            if pet is not None and pet["estado"] == comun.FALLIDO:
+                app.quitar_peticion(pet)
+            else:
+                app.cancelar_peticion(pet)
+        elif k == "r":
+            app.reintentar_peticion(pet)
         elif k == "L":
             app.limpiar_cola()
         elif k == "o":
@@ -3580,6 +3420,372 @@ class OverlayBuscar(Overlay):
         return True
 
 
+class OverlayFicha(Overlay):
+    """Todo lo que se sabe de una petición, encima de la Cola: la ficha, lo
+    que se mueve en su estado, y debajo pistas, fuentes e historia. Se lee de
+    la cola en cada cuadro, así que sigue viva mientras está abierta."""
+
+    def __init__(self, id_pet):
+        self.id_pet = id_pet
+
+    def dibujar(self, app):
+        win = app.pantalla
+        alto_p, ancho_p = win.getmaxyx()
+        y, x, alto, ancho = _marco(app, alto_p - 2, min(ancho_p - 4, 124), "ficha",
+                                   "esc cierra")
+        pet = comun.buscar_peticion(app.datos.cola, self.id_pet)
+        if pet is None:
+            escribir(win, y, x, "Esa petición ya no está en la cola.", TENUE)
+            return
+        self._detalle(app, pet, y, alto, x, ancho)
+
+    def tecla(self, app, k):
+        if k in ("\x1b", "\n", "\r", curses.KEY_ENTER, "q"):
+            app.cerrar_overlay()
+        return True
+
+    def _detalle(self, app, pet, y0, alto, x, ancho):
+        """Todo lo que se sabe de la petición, repartido según el sitio que haya:
+        ficha (a dos columnas si cabe), el bloque vivo del estado, y debajo
+        pistas, fuentes e historia; con mucho ancho, pistas a un lado y el
+        resto al otro."""
+        if pet is None or ancho < 20:
+            return
+        win = app.pantalla
+        t = time.monotonic()
+        estado = pet["estado"]
+        tope = y0 + alto
+
+        glifo, color_glifo = glifo_estado(estado, t)
+        derecha = f"{estado} · {desde(pet.get('actualizado', ''))}"
+        escribir(win, y0, x, elipsis(pet["consulta"], max(8, ancho - len(derecha) - 4)),
+                 BLANCO)
+        escribir(win, y0, x + ancho - len(derecha) - 2, glifo, color_glifo)
+        escribir(win, y0, x + ancho - len(derecha), derecha,
+                 COLOR_ESTADO.get(estado, NORMAL))
+        escribir(win, y0 + 1, x, VACIO * ancho, LINEA)
+        y = y0 + 2
+
+        campos = self._campos(app, pet)
+        if alto < 18:
+            # Poca altura: se quedan los campos de más peso, en su orden.
+            limite = max(2, (alto - 2) // 3)
+            elegidos = set(id(c) for c in sorted(campos, key=lambda c: c[3])[:limite])
+            campos = [c for c in campos if id(c) in elegidos]
+        y = self._ficha(win, y, x, ancho, campos, tope)
+        y = self._vivo(app, pet, y, x, ancho, tope, t, holgado=alto >= 18)
+
+        secciones = [s for s in (self._pistas(app, pet, ancho, t),
+                                 self._fuentes(app, pet, ancho),
+                                 self._historia(app, pet, ancho))
+                     if s is not None]
+        resto = tope - y
+        if not secciones or resto < 3:
+            return
+        lado_a_lado = (ancho >= 110 and resto >= 12 and len(secciones) > 1
+                       and secciones[0][0].startswith("pistas"))
+        if lado_a_lado:
+            col = (ancho - 3) // 2
+            self._apilar(win, y, x, col, resto, secciones[:1])
+            for yy in range(y + 1, tope):
+                escribir(win, yy, x + col + 1, "│", LINEA)
+            self._apilar(win, y, x + col + 3, ancho - col - 3, resto, secciones[1:])
+        else:
+            self._apilar(win, y, x, ancho, resto, secciones)
+
+    @staticmethod
+    def _ficha(win, y, x, ancho, campos, tope):
+        if not campos or y >= tope:
+            return y
+        if ancho >= 84:
+            col = (ancho - 3) // 2
+            mitad = (len(campos) + 1) // 2
+            columnas = [campos[:mitad], campos[mitad:]]
+            xs = [x, x + col + 3]
+        else:
+            col, columnas, xs = ancho, [campos], [x]
+        filas = max(len(c) for c in columnas)
+        for i in range(filas):
+            if y + i >= tope:
+                break
+            for cx, c in zip(xs, columnas):
+                if i < len(c):
+                    etiqueta, valor, color, _peso = c[i]
+                    escribir(win, y + i, cx, rellenar(etiqueta, 10), TENUE)
+                    escribir(win, y + i, cx + 10, elipsis(str(valor), col - 10), color)
+        return y + min(filas, tope - y)
+
+    def _campos(self, app, pet):
+        """(etiqueta, valor, color, peso). El peso decide qué sobrevive cuando
+        hay poca altura: 1 lo esencial, 2 lo útil, 3 lo prescindible."""
+        estado = pet["estado"]
+        creado = pet.get("creado", "")
+        campos = [("pedido", f"{hora_de(creado)} · {desde(creado)}", NORMAL, 2),
+                  ("tipo", "canción suelta" if pet.get("tipo") == "cancion" else "álbum",
+                   NORMAL, 3)]
+        if pet.get("lista"):
+            campos.append(("lista", pet["lista"], LILA, 2))
+        if estado == comun.BUSCANDO:
+            consulta = pet["consulta"]
+            termino = consulta if "flac" in consulta.casefold() else f"{consulta} flac"
+            campos.append(("término", termino, CIELO, 1))
+        if estado == comun.PENDIENTE:
+            activas = [p["id"] for p in app.datos.activas()]
+            delante = activas.index(pet["id"]) if pet["id"] in activas else 0
+            campos.append(("turno", "es la siguiente" if delante == 0
+                           else f"{delante} por delante", ARENA, 1))
+        cand = pet.get("candidato") or {}
+        if cand:
+            campos.append(("fuente", f"{cand.get('usuario', '?')} · "
+                                     f"{cand.get('puntos', '?')} pts", AGUA, 1))
+            campos.append(("carpeta", os.path.basename(
+                (cand.get("carpeta") or "").replace("\\", "/")), NORMAL, 3))
+            campos.append(("calidad", cand.get("detalle", ""), NORMAL,
+                           1 if estado == comun.DESCARGANDO else 2))
+        resultado = pet.get("resultado") or {}
+        if resultado:
+            campos.append(("destino", resultado.get("carpeta", ""), ESPUMA, 1))
+            if resultado.get("faltantes"):
+                campos.append(("faltan", ", ".join(
+                    f"{n:02d}" for n in resultado["faltantes"]), ARENA, 1))
+        if estado in comun.TERMINADOS:
+            tardo = duracion_entre(creado, pet.get("actualizado", ""))
+            if tardo:
+                campos.append(("tardó", tardo, TENUE, 2))
+        if pet.get("intentos"):
+            campos.append(("intentos", f"{pet['intentos']} agotado(s)", ARENA, 3))
+        if pet.get("rechazados"):
+            campos.append(("descartes", f"{len(pet['rechazados'])} fuente(s)", TENUE, 3))
+        mensaje = pet.get("mensaje") or ""
+        if mensaje and estado in (comun.FALLIDO, comun.CANCELADO):
+            campos.append(("motivo" if estado == comun.FALLIDO else "nota", mensaje,
+                           CORAL if estado == comun.FALLIDO else TENUE, 1))
+        return campos
+
+    def _vivo(self, app, pet, y, x, ancho, tope, t, holgado=True):
+        """Lo que se mueve: la barra de descarga, la cuenta de la búsqueda o el
+        pulso de la espera. Cada estado en marcha tiene el suyo."""
+        win = app.pantalla
+        estado = pet["estado"]
+        if tope - y < 2:
+            return y
+        hueco = 1 if holgado else 0
+
+        if estado == comun.DESCARGANDO:
+            y += hueco
+            p = pet.get("progreso") or {}
+            hechos, total = p.get("terminados", 0), p.get("total", 0) or 1
+            frac = hechos / total
+            cola = f"  {int(frac * 100):>3} %  {hechos} de {total} pistas"
+            ancho_barra = max(8, min(60, ancho - 10 - len(cola)))
+            escribir(win, y, x, rellenar("progreso", 10), TENUE)
+            barra(win, y, x + 10, ancho_barra, frac, AGUA,
+                  vivo=app.datos.velocimetro.actual > 0, t=t)
+            escribir(win, y, x + 10 + ancho_barra, cola, AGUA)
+            # una fila de aire: la barra y el oleaje de debajo son bloques
+            # macizos y, pegados, se leen como una sola mancha
+            y += 1 + hueco
+            if y < tope:
+                v = app.datos.velocimetro
+                escribir(win, y, x, rellenar("velocidad", 10), TENUE)
+                xx = escribir(win, y, x + 10,
+                              rellenar(f"{comun.formato_bytes(v.actual)}/s", 11), BLANCO)
+                # Por orden de prioridad: el contador (a la derecha), el
+                # medidor y, si aún sobra sitio, la chispa; ésta ya va en la
+                # barra de estado, así que es la primera que se cae.
+                bajado = f"{comun.formato_bytes(v.estimado())} bajados"
+                fin = x + ancho
+                if fin - xx >= len(bajado) + 10:
+                    escribir(win, y, fin - len(bajado), bajado, TENUE)
+                    fin -= len(bajado) + 2
+                sitio = fin - xx
+                if sitio >= 8:
+                    xx = escribir_trozos(win, y, xx, medidor(v, min(16, sitio), t)) + 2
+                sitio = fin - xx
+                if sitio >= 8:
+                    escribir_trozos(win, y, xx, chispa(v.historial, min(30, sitio)))
+                y += 1
+
+        elif estado == comun.BUSCANDO:
+            y += hueco
+            transcurrido = segundos_desde(pet.get("actualizado", ""))
+            frac = min(1.0, transcurrido / VENTANA_BUSQUEDA)
+            if transcurrido < VENTANA_BUSQUEDA:
+                cola = f"  {int(transcurrido):>2} s de {VENTANA_BUSQUEDA} · acumulando resultados"
+                color = CIELO
+            elif transcurrido < VENTANA_BUSQUEDA + 6:
+                cola, color = "  puntuando lo que llegó", CIELO
+            else:
+                cola = (f"  sin resultados aún · el plugin espera hasta "
+                        f"{VENTANA_BUSQUEDA * 3} s")
+                color = ARENA
+            ancho_barra = max(8, min(40, ancho - 12 - len(cola)))
+            escribir(win, y, x, rellenar("búsqueda", 10), TENUE)
+            glifo, color_glifo = sonar(t)
+            escribir(win, y, x + 10, glifo, color_glifo)
+            barra(win, y, x + 12, ancho_barra, frac, CIELO, t=t)
+            escribir(win, y, x + 12 + ancho_barra, elipsis(cola, ancho - 12 - ancho_barra),
+                     color)
+            y += 1
+
+        elif estado == comun.PENDIENTE:
+            y += hueco
+            escribir(win, y, x, rellenar("turno", 10), TENUE)
+            if app.datos.nicotine_vivo():
+                escribir(win, y, x + 10, GLIFO_ESTADO[comun.PENDIENTE], respiro(t))
+                escribir(win, y, x + 12, elipsis("esperando a que el plugin la tome",
+                                                 ancho - 12), TENUE)
+            else:
+                escribir(win, y, x + 10, elipsis(
+                    f"{AVISO} Nicotine+ está cerrado: la cola no avanza", ancho - 10), ARENA)
+            y += 1
+        return y
+
+    # ── las tres secciones: (título, filas, foco) o None ──
+    def _pistas(self, app, pet, ancho, t):
+        estado = pet["estado"]
+        if estado == comun.DESCARGANDO:
+            return self._pistas_bajando(app, pet, ancho, t)
+        if estado != comun.LISTO:
+            return None
+        carpeta = (pet.get("resultado") or {}).get("carpeta")
+        if not carpeta:
+            return None
+        ruta = os.path.join(comun.RAIZ_BIBLIOTECA, carpeta)
+        if not os.path.isdir(ruta):
+            # quizá se pasó a la heredada con h, para compartirla
+            ruta = os.path.join(Biblioteca.RAIZ_HEREDADA, carpeta)
+        if not os.path.isdir(ruta):
+            return ("pistas", [([(f"{AVISO} la carpeta ya no está en {carpeta}", ARENA)], [])],
+                    None)
+        app.biblioteca.pedir_analisis({"dir": ruta})
+        det = app.biblioteca.detalle.get(ruta)
+        if det is None:
+            return ("pistas", [(cargando("leyendo las pistas…", t), [])], None)
+
+        pistas = sorted(det["pistas"], key=lambda p: (p.get("disco") or 1, p.get("pista") or 0))
+        faltan = set(det.get("huecos") or [])
+        filas, total = [], 0
+        for p in pistas:
+            n = p.get("pista")
+            while faltan and min(faltan) < (n or 0):
+                h = min(faltan)
+                faltan.discard(h)
+                filas.append(([(f"{h:02d}  ", ARENA), ("— falta —", ARENA)], []))
+            total += p.get("tamaño", 0)
+            filas.append(([(f"{n:02d}  " if n else "··  ", TENUE),
+                           (p.get("titulo") or p["archivo"], NORMAL)],
+                          [(duracion(p.get("duracion")), TENUE), ("  ", None),
+                           (f"{comun.formato_bytes(p.get('tamaño', 0)):>9}", TENUE),
+                           ("  ", None), (OK, ESPUMA)]))
+        for h in sorted(faltan):
+            filas.append(([(f"{h:02d}  ", ARENA), ("— falta —", ARENA)], []))
+        if not filas:
+            filas.append(([(det.get("calidad") or "sin pistas legibles", ARENA)], []))
+        titulo = f"pistas · {len(pistas)} · {det.get('calidad', '')} · {comun.formato_bytes(total)}"
+        return (titulo, filas, None)
+
+    def _pistas_bajando(self, app, pet, ancho, t):
+        datos = app.datos
+        p = pet.get("progreso") or {}
+        total = p.get("total", 0) or 0
+        hechos = max(p.get("terminados", 0), len(datos.bajados))
+        filas = []
+        for i, (nombre, b) in enumerate(datos.bajados, 1):
+            filas.append(([(f"{i:02d}  ", TENUE), (_sin_numero(nombre), NORMAL)],
+                          [(f"{comun.formato_bytes(b):>9}", TENUE), ("  ", None), (OK, ESPUMA)]))
+        foco = None
+        v = datos.velocimetro
+        for nombre, b in datos.incompletos:
+            estimado = b + v.actual * max(0.0, time.monotonic() - datos.muestreado_en)
+            foco = len(filas)
+            filas.append(([(f"{len(filas) + 1:02d}  ", BLANCO),
+                           (_sin_numero(nombre), BLANCO)],
+                          corriente(10 if ancho >= 50 else 6, t)
+                          + [(f" {comun.formato_bytes(estimado):>9}", AGUA)]))
+        pendientes = total - len(filas)
+        for _i in range(max(0, pendientes)):
+            filas.append(([(f"{len(filas) + 1:02d}  ", LINEA), ("pendiente", TENUE)],
+                          [("·", LINEA)]))
+        if not filas:
+            filas.append((cargando("esperando al primer archivo…", t, TENUE), []))
+        titulo = f"pistas · {hechos} de {total} bajadas"
+        return (titulo, filas, foco)
+
+    def _fuentes(self, app, pet, ancho):
+        candidatos = app.datos.candidatos(pet["id"])
+        if not candidatos:
+            return None
+        cand = pet.get("candidato") or {}
+        elegida = (cand.get("usuario"),
+                   os.path.basename((cand.get("carpeta") or "").replace("\\", "/")))
+        descartadas = {(u, os.path.basename((c or "").replace("\\", "/")))
+                       for u, c in (pet.get("rechazados") or [])}
+        filas = []
+        for c in candidatos:
+            clave = (c["usuario"], c["carpeta"])
+            es_elegida = clave == elegida
+            es_descartada = clave in descartadas
+            izq = [(f"{c['puntos']:>4}  ", AGUA if es_elegida else TENUE),
+                   (rellenar(c["usuario"], 16) + "  ", BLANCO if es_elegida else NORMAL)]
+            if ancho >= 56:
+                izq.append((rellenar(c["detalle"], 28) + "  ", TENUE))
+            if ancho >= 84:
+                izq.append((c["carpeta"], TENUE))
+            corto = ancho < 70
+            der = ([("◂" if corto else "◂ elegida", AGUA)] if es_elegida
+                   else [(MAL if corto else f"{MAL} descartada", CORAL)] if es_descartada
+                   else [])
+            filas.append((izq, der))
+        return (f"fuentes · {len(filas)} candidatas", filas, None)
+
+    def _historia(self, app, pet, ancho):
+        lineas = app.datos.historia(pet["id"])
+        filas = []
+        for linea in lineas:
+            m = PATRON_LOG.match(linea)
+            if not m:
+                continue
+            marca, etiqueta, resto = m.groups()
+            if etiqueta == "candidato":
+                continue                       # eso ya está en «fuentes»
+            resto = (resto.replace("/" + pet["id"], "").replace(pet["id"], "")
+                          .replace(comun.DIR_DESCARGAS, ".descargas")
+                          .replace(comun.RAIZ_BIBLIOTECA + os.sep, ""))
+            resto = re.sub(r"\s{2,}", " ", resto).strip(" :")
+            color = VistaLog.ETIQUETAS.get(etiqueta.split()[0], NORMAL)
+            hora = marca[11:19] if len(marca) > 18 else marca
+            filas.append(([(hora + "  ", TENUE), (rellenar(etiqueta, 10) + " ", color),
+                           (resto, NORMAL)], []))
+        if not filas:
+            return None
+        if pet["estado"] in comun.EN_CURSO:
+            izq, der = filas[-1]
+            filas[-1] = ([izq[0], izq[1], (izq[2][0], BLANCO)], der)
+        return (f"historia · {len(filas)} líneas", filas, len(filas) - 1)
+
+    @staticmethod
+    def _apilar(win, y, x, ancho, alto, secciones):
+        """Reparte `alto` filas entre las secciones: cada una recibe hasta 4 de
+        entrada y lo que sobre se reparte por orden. Cada sección empieza con
+        una fila en blanco."""
+        necesidades = [len(filas) + 2 for _t, filas, _f in secciones]
+        alturas = [0] * len(secciones)
+        libre = alto
+        for i, n in enumerate(necesidades):
+            alturas[i] = min(n, 4, libre)
+            libre -= alturas[i]
+        for i, n in enumerate(necesidades):
+            extra = min(n - alturas[i], libre)
+            alturas[i] += extra
+            libre -= extra
+        for (titulo, filas, foco), h in zip(secciones, alturas):
+            if h < 3:
+                continue
+            pintar_seccion(win, y + 1, x, ancho, h - 1, titulo, filas, foco)
+            y += h
+
+
 class OverlayConfirmar(Overlay):
     def __init__(self, pregunta, accion):
         self.pregunta = pregunta
@@ -3623,7 +3829,8 @@ class OverlayAyuda(Overlay):
                   ("?", "esta ayuda"),
                   ("q", "salir")]
         filas.append(("", f"en «{vista.nombre}»"))
-        filas += [(t, d) for t, d in vista.teclas(app)]
+        # `ayuda` si la vista tiene teclas que no caben en el pie
+        filas += [(t, d) for t, d in getattr(vista, "ayuda", vista.teclas)(app)]
         y, x, alto, ancho = _marco(app, len(filas) + 4, 62, "ayuda", "? cierra")
         win = app.pantalla
         for i, (tecla, texto) in enumerate(filas):
@@ -3799,6 +4006,46 @@ class App:
         comun.modificar_cola(_op)
         comun.registrar(f"[cancelada] {pet['id']}")
         self.avisar(f"cancelada {pet['consulta']}", ARENA)
+
+    def reintentar_peticion(self, pet):
+        """Una fallida vuelve a esperar turno con los intentos a cero. Los
+        descartes se quedan: el plugin no vuelve a elegir esas fuentes."""
+        if pet is None or pet["estado"] != comun.FALLIDO:
+            self.avisar("sólo se reintenta una petición fallida", ARENA)
+            return
+
+        def _op(cola):
+            objetivo = comun.buscar_peticion(cola, pet["id"])
+            if objetivo is None or objetivo["estado"] != comun.FALLIDO:
+                return False
+            objetivo.update(estado=comun.PENDIENTE, actualizado=comun.ahora(), intentos=0,
+                            candidato=None, progreso=None, resultado=None, mensaje="")
+            return True
+
+        if not comun.modificar_cola(_op):
+            self.avisar("esa petición ya no está fallida", ARENA)
+            return
+        # [cola] y no otra etiqueta: así Datos.historia no le pasa a esta
+        # petición las líneas sin id de la que se esté bajando.
+        comun.registrar(f"[cola] ↻ {pet['id']}  ({pet['consulta']}) otra vez, "
+                        f"sin {len(pet.get('rechazados') or [])} fuente(s) descartada(s)")
+        self.avisar(f"↻ {titulo_peticion(pet)} vuelve a la cola", ESPUMA)
+
+    def quitar_peticion(self, pet):
+        """Saca de cola.json una petición fallida. Lo que pasó sigue en el log."""
+        if pet is None or pet["estado"] != comun.FALLIDO:
+            self.avisar("sólo se quita una petición fallida; x cancela las demás", ARENA)
+            return
+
+        def _op(cola):
+            antes = len(cola["peticiones"])
+            cola["peticiones"] = [p for p in cola["peticiones"]
+                                  if not (p["id"] == pet["id"] and p["estado"] == comun.FALLIDO)]
+            return antes - len(cola["peticiones"])
+
+        if comun.modificar_cola(_op):
+            comun.registrar(f"[cola] - {pet['id']}  ({pet['consulta']}) quitada")
+            self.avisar(f"quitada {titulo_peticion(pet)}", TENUE)
 
     def limpiar_cola(self):
         def _op(cola):
@@ -4256,7 +4503,7 @@ class App:
         if resumen:
             cola.append(resumen)
         activas = len(self.datos.activas())
-        if activas:
+        if activas and not isinstance(self.vista(), VistaCola):   # la Cola ya lo dice
             cola.append(f"{activas} en cola")
         if self.marcados:
             cola.append(f"{len(self.marcados)} marcados")
@@ -4312,9 +4559,11 @@ class App:
             p = self.datos.eventos.popleft()
             estado = p["estado"]
             if estado == comun.LISTO:
-                r = p.get("resultado") or {}
-                self.avisar(f"{OK} {p['consulta']} · {r.get('pistas', '?')} pistas · "
-                            f"{r.get('calidad', '')}", ESPUMA, 6)
+                faltan = (p.get("resultado") or {}).get("faltantes") or []
+                falta = (f" · faltan {len(faltan)} pista{'s' if len(faltan) > 1 else ''}"
+                         if faltan else "")
+                self.avisar(f"{OK} {titulo_peticion(p)} terminado{falta} · ya está en la "
+                            f"Biblioteca", ARENA if faltan else ESPUMA, 6)
             elif estado == comun.FALLIDO:
                 self.avisar(f"{MAL} {p['consulta']} · {p.get('mensaje') or 'falló'}", CORAL, 8)
             elif estado == comun.DESCARGANDO:
