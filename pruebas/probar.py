@@ -134,7 +134,12 @@ def iso(delta_s):
 
 
 def escenario_falso(raiz, en_curso="descargando"):
-    """Cola con una descarga en marcha, una búsqueda, una en espera y lo real."""
+    """Cola con una descarga en marcha, una búsqueda, una en espera y lo real.
+
+    Con `descargando`, además una búsqueda y una fallida, dos pistas a medio
+    bajar a la vez (esc["_actual"] es la lista, para crecer()) y un
+    downloads.json de mentira con el tamaño de cada pista de Nujabes salvo el
+    de la 08, para que una pista tenga porcentaje y la otra no."""
     shutil.rmtree(raiz, ignore_errors=True)
     pipeline = os.path.join(raiz, ".pipeline")
     descargas = os.path.join(raiz, ".descargas")
@@ -170,8 +175,17 @@ def escenario_falso(raiz, en_curso="descargando"):
         "creado": iso(20), "actualizado": iso(20), "intentos": 0, "candidato": None,
         "rechazados": [], "progreso": None, "resultado": None, "mensaje": None,
     }
+    id_falla = "20260904-085500-hiatus-kaiyote-mood-valiant"
+    falla = {
+        "id": id_falla, "consulta": "Hiatus Kaiyote - Mood Valiant", "tipo": "album",
+        "artista": "Hiatus Kaiyote", "album": "Mood Valiant", "estado": "fallido",
+        "creado": iso(900), "actualizado": iso(500), "intentos": 3, "candidato": None,
+        "rechazados": [["vinyl_rips", "music\\Hiatus Kaiyote\\Mood Valiant [MP3 320]"],
+                       ["neosoul_crate", "share\\Hiatus Kaiyote - Mood Valiant"]],
+        "progreso": None, "resultado": None, "mensaje": "nadie lo tiene en FLAC",
+    }
     if en_curso == "descargando":
-        activas = [baja, espera]
+        activas = [falla, baja, busca, espera]
     else:
         activas = [busca, espera]
     cola = {"version": 1, "peticiones": listas + activas}
@@ -211,31 +225,67 @@ def escenario_falso(raiz, en_curso="descargando"):
         lineas.append(f"{hoy}T09:06:05  [buscar] {id_busca} token=1938701 término='Tom Misch - Geography flac'")
     open(os.path.join(pipeline, "pipeline.log"), "w").write("\n".join(lineas) + "\n")
 
-    actual = os.path.join(incompletos, "INCOMPLETE" + "ab" * 16 + "07 The Sign.flac")
-    with open(actual, "wb") as f:
-        f.write(b"\0" * 5_000_000)
+    # Dos pistas a medio bajar a la vez, como hace Nicotine+ con una carpeta.
+    a_medias = [("ab" * 16, "07 The Sign.flac", 5_000_000)]
+    if en_curso == "descargando":
+        a_medias.append(("ef" * 16, "08 Thank You.flac", 2_000_000))
+    actuales = []
+    for md5, archivo, ya in a_medias:
+        ruta = os.path.join(incompletos, "INCOMPLETE" + md5 + archivo)
+        with open(ruta, "wb") as f:
+            f.write(b"\0" * ya)
+        actuales.append(ruta)
+
+    # Lo que Nicotine+ guarda en downloads.json: [usuario, ruta remota, carpeta,
+    # estado, tamaño, bytes, atributos]. Falta la 08 a propósito, y hay una
+    # fila de otra descarga que no es de esta petición.
+    remota = "music\\Nujabes\\Modal Soul (2005) [FLAC]\\"
+    tamanos = {f"{i:02d} {nombre}.flac": 30_000_000 + i * 2_500_000
+               for i, nombre in enumerate(pistas, 1)}
+    filas = [["shibuya_kei", remota + archivo, carpeta,
+              "Finished" if i <= 6 else "Transferring" if i <= 8 else "Queued",
+              tam, tam if i <= 6 else None, {}]
+             for i, (archivo, tam) in enumerate(tamanos.items(), 1)
+             if not archivo.startswith("08 ")]
+    filas.append(["otro", "x\\y\\Otra cosa.flac", os.path.join(raiz, "Downloads"),
+                  "Finished", 12_345_678, 12_345_678, {}])
+    transferencias = os.path.join(raiz, "downloads.json")
+    with open(transferencias, "w", encoding="utf-8") as f:
+        json.dump(filas, f, ensure_ascii=False)
 
     return {
         "comun": {"ARCHIVO_COLA": os.path.join(pipeline, "cola.json"),
                   "ARCHIVO_LOCK": os.path.join(pipeline, "cola.lock"),
                   "ARCHIVO_LOG": os.path.join(pipeline, "pipeline.log"),
                   "DIR_DESCARGAS": descargas},
-        "tui": {"DIR_INCOMPLETOS": incompletos},
+        "tui": {"DIR_INCOMPLETOS": incompletos, "ARCHIVO_TRANSFERENCIAS": transferencias},
         "nicotine_vivo": True,
-        "_actual": actual, "_cola": os.path.join(pipeline, "cola.json"),
-        "_id_baja": id_baja, "_carpeta": carpeta,
+        "_actual": actuales, "_cola": os.path.join(pipeline, "cola.json"),
+        "_id_baja": id_baja, "_carpeta": carpeta, "_tamanos": tamanos,
+        "_transferencias": transferencias, "_remota": remota, "_id_falla": id_falla,
     }
 
 
-def crecer(archivo, parar, bytes_s=4_200_000):
-    """Simula la descarga: el archivo incompleto engorda a ~4 MB/s con vaivén."""
+def crecer(archivos, parar, bytes_s=4_200_000):
+    """Simula la descarga: cada archivo incompleto (uno o una lista) engorda con
+    vaivén, el primero a ~4 MB/s y cada siguiente a poco más de la mitad."""
     import math
+    if isinstance(archivos, str):
+        archivos = [archivos]
     t0 = time.monotonic()
     while not parar.is_set():
         time.sleep(0.25)
-        v = bytes_s * (1 + 0.35 * math.sin((time.monotonic() - t0) * 1.7))
-        with open(archivo, "ab") as f:
-            f.write(b"\0" * int(v * 0.25))
+        fase = (time.monotonic() - t0) * 1.7
+        for i, archivo in enumerate(archivos):
+            v = bytes_s * 0.55 ** i * (1 + 0.35 * math.sin(fase + i))
+            try:                 # sin crearlo: si ya no está, terminó
+                fd = os.open(archivo, os.O_WRONLY | os.O_APPEND)
+            except OSError:
+                continue
+            try:
+                os.write(fd, b"\0" * int(v * 0.25))
+            finally:
+                os.close(fd)
 
 
 # ─── recorridos ──────────────────────────────────────────────────────────────

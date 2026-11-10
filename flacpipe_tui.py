@@ -19,6 +19,7 @@ Estructura:
 """
 
 import curses
+import json
 import locale
 import math
 import os
@@ -67,6 +68,16 @@ VENTANA_BUSQUEDA = 45
 # Donde Nicotine+ escribe cada archivo mientras lo baja (config: incompletedir).
 DIR_INCOMPLETOS = comun.DIR_INCOMPLETOS
 PATRON_INCOMPLETO = re.compile(r"^INCOMPLETE[0-9a-f]{32}(.+)$")
+# La lista de transferencias que Nicotine+ guarda cada pocos minutos. Cada fila
+# es [usuario, ruta_remota, carpeta, estado, tamaño, ...] (Nicotine+ 3.x,
+# pynicotine/transfers.py): de ahí sale cuánto pesa cada pista. "" si no hay.
+ARCHIVO_TRANSFERENCIAS = (os.path.join(comun.NICOTINE["datos"], "downloads.json")
+                          if comun.NICOTINE.get("datos") else "")
+# Segundos que una pista recién terminada sigue contando como «recién bajada».
+SEGUNDOS_RECIEN = 3.0
+# Lo que Nicotine+ cambia por «_» en el nombre de un archivo (utils.clean_file).
+PATRON_NOMBRE_ILEGAL = re.compile(r'[/?:><|*"\x00-\x1f]')
+PATRON_CALIDAD = re.compile(r"(\?|\d+)-bit(?:\s*/\s*([\d.]+)\s*kHz)?")
 
 GLIFO_ESTADO = {
     comun.PENDIENTE: "•",
@@ -911,6 +922,21 @@ class Velocimetro:
 
 # ─── Datos ────────────────────────────────────────────────────────────────────
 
+def calidad_corta(detalle):
+    """La calidad de la fuente en pocas letras, sacada del `detalle` que el
+    plugin guarda en el candidato («15 pistas, 16-bit / 44.1 kHz»):
+    «FLAC 16/44.1», «FLAC 24/96»; «FLAC» si no se sabe cuántos bits, y ""
+    si no hay detalle. Es de la carpeta entera, no de cada pista."""
+    if not detalle:
+        return ""
+    m = PATRON_CALIDAD.search(detalle)
+    if not m or m.group(1) == "?":
+        return "FLAC"
+    if m.group(2):
+        return f"FLAC {m.group(1)}/{m.group(2)}"
+    return f"FLAC {m.group(1)}"
+
+
 class Datos:
     """Sondeo del estado del pipeline en un hilo aparte.
 
@@ -929,6 +955,16 @@ class Datos:
         self.incompletos = []    # (archivo, bytes) que Nicotine+ está escribiendo ahora
         self.muestreado_en = 0.0
         self.velocimetro = Velocimetro()
+        # Pista a pista, de la petición en curso:
+        #   pistas_activas     [{"archivo", "bytes", "total", "velocidad"}] de lo
+        #                      que baja ahora; "total" es None si Nicotine+ aún no
+        #                      ha dicho cuánto pesa (nunca se estima)
+        #   recien_bajadas     {archivo: monotonic} de las que acaban de terminar
+        #   bytes_album_total  lo que pesa el álbum entero, o None si falta el
+        #                      tamaño de alguna pista
+        self.pistas_activas = []
+        self.recien_bajadas = {}
+        self.bytes_album_total = None
         self.cambios = {}        # id -> (estado nuevo, monotonic): para el parpadeo
         self.eventos = deque()   # peticiones que cambiaron de estado: para los avisos
         self.aviso = ""
@@ -940,6 +976,10 @@ class Datos:
         self._historia_clave = None
         self._historia = []
         self._candidatos = []
+        self._velocimetros = {}          # archivo incompleto -> Velocimetro
+        self._id_activa = None
+        self._mtime_transferencias = None
+        self._transferencias = {}        # id de petición -> {archivo: tamaño}
         self._parar = threading.Event()
         self._hilo = None
 
@@ -1029,6 +1069,11 @@ class Datos:
                 sueltos.append(ruta)
         self.sobras, self.sueltos = sobras, sueltos
 
+        if activa is None or activa["id"] != self._id_activa:
+            self._velocimetros = {}
+            self.pistas_activas, self.recien_bajadas = [], {}
+            self.bytes_album_total = None
+        self._id_activa = activa["id"] if activa is not None else None
         if activa is None:
             self.velocimetro.reiniciar()
             self.bajados, self.incompletos = [], []
@@ -1063,10 +1108,106 @@ class Datos:
             pass
         incompletos.sort()
 
+        # Si Nicotine+ ya apuntó los archivos de esta petición, el incompleto
+        # que downloads.json pone en otra carpeta y no en ésta es de otra
+        # descarga. Lo que no nombra se queda: puede que aún no lo haya guardado.
+        self._leer_transferencias()
+        tamanos = self._transferencias.get(activa["id"], {})
+        if tamanos:
+            ajenos = set()
+            for id_pet, nombres in self._transferencias.items():
+                if id_pet != activa["id"]:
+                    ajenos.update(nombres)
+            incompletos = [(n, b) for n, b in incompletos
+                           if n in tamanos or n not in ajenos]
+
+        self._mirar_pistas(activa, bajados, incompletos, tamanos)
         self.bajados, self.incompletos = bajados, incompletos
         self.muestreado_en = time.monotonic()
         self.velocimetro.muestra(sum(b for _n, b in bajados)
                                  + sum(b for _n, b in incompletos))
+
+    def _mirar_pistas(self, activa, bajados, incompletos, tamanos):
+        """Bytes, tamaño y velocidad de cada pista que baja ahora, y cuáles
+        acaban de pasar de incompletas a completas."""
+        ahora = time.monotonic()
+        nombres = {n for n, _b in incompletos}
+        completos = {n for n, _b in bajados}
+        recien = {n: t for n, t in self.recien_bajadas.items()
+                  if ahora - t < SEGUNDOS_RECIEN}
+        for pista in self.pistas_activas:
+            n = pista["archivo"]
+            if n not in nombres and n in completos and n not in recien:
+                recien[n] = ahora
+
+        velocimetros = {n: v for n, v in self._velocimetros.items() if n in nombres}
+        activas = []
+        for n, b in incompletos:
+            v = velocimetros.setdefault(n, Velocimetro())
+            v.muestra(b)
+            activas.append({"archivo": n, "bytes": b, "total": tamanos.get(n),
+                            "velocidad": v.actual})
+        self._velocimetros = velocimetros
+        self.pistas_activas, self.recien_bajadas = activas, recien
+
+        total = None
+        esperadas = (activa.get("progreso") or {}).get("total")
+        if (tamanos and None not in tamanos.values()
+                and (not esperadas or esperadas == len(tamanos))):
+            total = sum(tamanos.values())
+        self.bytes_album_total = total
+
+    def _leer_transferencias(self):
+        """Los tamaños que Nicotine+ guardó en downloads.json, por petición.
+        Sólo se relee si cambió. Nicotine+ lo reescribe en el sitio tras pasar
+        el anterior a downloads.json.old: si se pilla a medias, si falta o si
+        está roto, vale el .old, como hace el propio Nicotine+; si tampoco
+        sirve, no hay tamaños."""
+        try:
+            mtime = os.path.getmtime(ARCHIVO_TRANSFERENCIAS) if ARCHIVO_TRANSFERENCIAS else None
+        except OSError:
+            mtime = None
+        if mtime == self._mtime_transferencias:
+            return
+        self._mtime_transferencias = mtime
+        por_peticion = {}
+        filas = []
+        for archivo in ((ARCHIVO_TRANSFERENCIAS, ARCHIVO_TRANSFERENCIAS + ".old")
+                        if ARCHIVO_TRANSFERENCIAS else ()):
+            try:
+                with open(archivo, encoding="utf-8") as f:
+                    filas = json.load(f)
+            except (OSError, ValueError):
+                filas = None
+            if isinstance(filas, list):
+                break
+        if not isinstance(filas, list):
+            filas = []
+        for fila in filas:
+            if not isinstance(fila, list) or len(fila) < 3:
+                continue
+            ruta, carpeta = fila[1], fila[2]
+            if not isinstance(ruta, str) or not isinstance(carpeta, str) or not carpeta:
+                continue
+            # La carpeta de destino es .descargas/<id>: el id basta, venga la
+            # ruta de dentro del snap o de fuera.
+            id_pet = os.path.basename(os.path.normpath(carpeta))
+            tam = fila[4] if len(fila) > 4 else None
+            if isinstance(tam, bool) or not isinstance(tam, (int, float)) or tam <= 0:
+                tam = None
+            nombre = self._nombre_local(ruta)
+            if nombre:
+                por_peticion.setdefault(id_pet, {})[nombre] = (
+                    int(tam) if tam is not None else None)
+        self._transferencias = por_peticion
+
+    @staticmethod
+    def _nombre_local(ruta_remota):
+        """El nombre con el que Nicotine+ guarda un archivo remoto: lo que va
+        tras la última «\\», con lo ilegal cambiado por «_» (utils.clean_file)."""
+        nombre = PATRON_NOMBRE_ILEGAL.sub("_", ruta_remota.rpartition("\\")[2])
+        limpio = nombre.lstrip(" ").rstrip(". ")
+        return limpio or "_" * len(nombre)
 
     # ── consultas ──
     def peticiones(self):
@@ -1076,10 +1217,12 @@ class Datos:
         return [p for p in self.peticiones() if p["estado"] in comun.ACTIVOS]
 
     def peticion_en_curso(self):
-        for pet in self.peticiones():
-            if pet["estado"] in comun.EN_CURSO:
+        """La que baja ahora; si ninguna baja, la que se está buscando."""
+        en_curso = [p for p in self.peticiones() if p["estado"] in comun.EN_CURSO]
+        for pet in en_curso:
+            if pet["estado"] == comun.DESCARGANDO:
                 return pet
-        return None
+        return en_curso[0] if en_curso else None
 
     def nicotine_vivo(self):
         return self.pid_nicotine is not None
